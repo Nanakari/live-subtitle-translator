@@ -1,0 +1,11 @@
+# Copy this file to config.local.yaml for settings specific to your machine.
+# config.local.yaml is ignored by Git and overrides values in config.yaml.
+
+network:
+  # Example: "http://127.0.0.1:7897"
+  proxy_url: ""
+
+gemini:
+  # Prefer the GEMINI_API_KEY environment variable. If you put a key here,
+  # keep it only in config.local.yaml and never commit it.
+  api_key: ""

@@ -1,0 +1,87 @@
+app:
+  title: "Gemini Live Translator"
+  debug: false
+  log_file: "app.log"
+
+audio:
+  sample_rate: 16000
+  channels: 1
+  chunk_ms: 100
+
+network:
+  # Leave empty for a direct connection. Put a machine-specific proxy in
+  # config.local.yaml instead of editing this shared file.
+  proxy_url: ""
+  no_proxy: "localhost,127.0.0.1,::1"
+
+gemini:
+  # Optional: paste your API key here if you do not want to use an environment variable.
+  # Warning: config.yaml is plain text. Do not share or commit it with a real API key.
+  api_key: ""
+  # Fallback: used only when api_key is empty.
+  api_key_env: "GEMINI_API_KEY"
+  model: "gemini-3.5-live-translate-preview"
+  source_language: "ja"
+  target_language_code: "zh-Hans"
+  echo_target_language: false
+  show_input_transcription: true
+  log_transcriptions: false
+  reconnect: true
+  reconnect_delay_seconds: 2
+
+subtitle:
+  # sentence: display only after a sentence is complete and paired.
+  # streaming: show incomplete pending text as it arrives.
+  display_mode: "sentence"
+  # bilingual: original Japanese + Chinese translation.
+  # translation: Chinese translation only.
+  # source: original Japanese only.
+  subtitle_language: "bilingual"
+  # classic: original multi-line history window.
+  # compact: browser-style continuous original/translation tracks (default).
+  layout_style: "compact"
+  compact_height: 68
+  compact_window_width: 900
+  compact_min_window_width: 380
+  compact_font_size: 20
+  # A lightly translucent charcoal surface keeps the overlay readable without
+  # feeling like a solid bar over the video.
+  compact_opacity: 0.90
+  compact_background_color: "#161a20"
+  font_size: 14
+  # Microsoft YaHei UI renders Japanese kana and Chinese more evenly on Windows.
+  font_family: "Microsoft YaHei UI"
+  font_weight: "normal"
+  render_interval_ms: 100
+  opacity: 1.0
+  always_on_top: true
+  window_width: 760
+  window_height: 260
+  min_window_width: 420
+  max_history_sentences: 8
+  min_pending_display_chars: 12
+  min_block_chars: 8
+  target_line_chars: 32
+  max_pending_chars: 72
+  log_rendered_subtitles: true
+  duplicate_recent_window: 6
+  duplicate_min_chars: 6
+  # Pair Chinese output with the latest Japanese transcription window.
+  ja_pair_window_seconds: 2.0
+  ja_pair_max_chars: 60
+  ja_pair_preroll_seconds: 0.5
+  ja_pair_postroll_seconds: 0.25
+  pair_commit_delay_ms: 900
+  require_bilingual_for_display: true
+  max_wait_for_ja_ms: 1800
+  skip_filler_subtitles: true
+  filler_max_chars: 6
+  # Meaningful short phrases are merged into the next sentence when possible.
+  max_short_carry_ms: 3000
+  clear_ja_after_pair: true
+  background_color: "#111111"
+  text_color: "#ffffff"
+  accent_color: "#ffffff"
+  # 0 disables text truncation; the subtitle window wraps long text instead.
+  max_chars: 0
+  dedup: true
