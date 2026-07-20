@@ -3,12 +3,20 @@ let activeTabId = null;
 const DEFAULT_SETTINGS = { displayMode: "sentence", subtitleLanguage: "bilingual" };
 
 async function getLiveState() {
-  const state = await chrome.storage.session.get(["translationActive", "latestSubtitle"]);
-  return { translationActive: Boolean(state.translationActive), latestSubtitle: state.latestSubtitle || null };
+  const state = await chrome.storage.session.get(["translationActive", "latestSubtitle", "subtitleState"]);
+  return {
+    translationActive: Boolean(state.translationActive),
+    latestSubtitle: state.latestSubtitle || null,
+    subtitleState: state.subtitleState || null,
+  };
 }
 
 async function setLiveState(translationActive, latestSubtitle = null) {
   await chrome.storage.session.set({ translationActive, latestSubtitle });
+}
+
+async function setSubtitleState(state) {
+  await chrome.storage.session.set({ subtitleState: state || null });
 }
 
 async function setPluginError(message = "") {
@@ -69,7 +77,7 @@ function supportsSubtitleOverlay(tab) {
   return Boolean(tab?.id && /^https?:\/\//i.test(tab.url || ""));
 }
 
-async function showSubtitleInTab(tabId, latestSubtitle = null) {
+async function showSubtitleInTab(tabId, latestSubtitle = null, subtitleState = null) {
   try {
     await prepareTab(tabId);
   } catch (_) {
@@ -80,14 +88,15 @@ async function showSubtitleInTab(tabId, latestSubtitle = null) {
   await tellTab(tabId, { type: "subtitle-start" });
   await tellTab(tabId, { type: "subtitle-settings", settings: subtitleSettings });
   if (subtitleLayout) await tellTab(tabId, { type: "subtitle-layout", layout: subtitleLayout });
-  if (latestSubtitle) await tellTab(tabId, latestSubtitle);
+  if (subtitleState) await tellTab(tabId, { type: "subtitle-state", state: subtitleState });
+  else if (latestSubtitle) await tellTab(tabId, latestSubtitle);
 }
 
 async function showSubtitleInAllTabs() {
-  const { translationActive, latestSubtitle } = await getLiveState();
+  const { translationActive, latestSubtitle, subtitleState } = await getLiveState();
   if (!translationActive) return;
   const tabs = await chrome.tabs.query({});
-  await Promise.all(tabs.filter(supportsSubtitleOverlay).map(tab => showSubtitleInTab(tab.id, latestSubtitle)));
+  await Promise.all(tabs.filter(supportsSubtitleOverlay).map(tab => showSubtitleInTab(tab.id, latestSubtitle, subtitleState)));
 }
 
 async function broadcastToSubtitleTabs(message) {
@@ -134,10 +143,10 @@ async function stopCaptureAndWait(tabId) {
 }
 
 async function restoreSubtitleAfterNavigation(tabId) {
-  const { translationActive, latestSubtitle } = await getLiveState();
+  const { translationActive, latestSubtitle, subtitleState } = await getLiveState();
   if (!translationActive) return;
   const tab = await chrome.tabs.get(tabId);
-  if (supportsSubtitleOverlay(tab)) await showSubtitleInTab(tabId, latestSubtitle);
+  if (supportsSubtitleOverlay(tab)) await showSubtitleInTab(tabId, latestSubtitle, subtitleState);
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -157,6 +166,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // otherwise it could recreate overlays in every tab after shutdown.
     getLiveState()
       .then(state => state.translationActive ? setLiveState(true, message).then(() => broadcastToSubtitleTabs(message)) : null)
+      .catch(() => {});
+    return;
+  }
+  if (message.type === "subtitle-state") {
+    getLiveState()
+      .then(state => state.translationActive ? setSubtitleState(message.state) : null)
       .catch(() => {});
     return;
   }
@@ -191,7 +206,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error("没有找到当前标签页。");
       await setPluginError("");
-      await chrome.storage.session.remove(["directDiagnostics", "lastPluginError"]);
+      await chrome.storage.session.remove(["directDiagnostics", "lastPluginError", "subtitleState"]);
       const previousTabId = await getActiveTabId();
       if (previousTabId) {
         await stopCaptureAndWait(previousTabId);
@@ -210,6 +225,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === "stop") {
       const captureTabId = await getActiveTabId();
       await setLiveState(false);
+      await chrome.storage.session.remove("subtitleState");
       try { await stopCaptureAndWait(captureTabId); } catch (_) { /* The UI must still close. */ }
       // Remove every visible overlay, including overlays created in tabs the
       // user navigated to after starting the translation.

@@ -8,6 +8,7 @@ const defaults = { displayMode: "sentence", subtitleLanguage: "bilingual" };
 let settings = { ...defaults };
 let root, history, sourceHistory, translationHistory, pending;
 let latestInput = "", latestOutput = "", lastCommitted = "";
+let historyEntries = [];
 let pointerAction = null;
 let closedByUser = false;
 let disposed = false;
@@ -21,6 +22,7 @@ function disposeContentScript() {
   root?.remove();
   clearTimeout(pendingCommitTimer);
   root = history = sourceHistory = translationHistory = pending = null;
+  historyEntries = [];
   try { if (messageListener) chrome.runtime.onMessage.removeListener(messageListener); } catch (_) {}
 }
 
@@ -155,17 +157,54 @@ function appendHistory(source, translation) {
   const signature = `${source}\n${translation}`;
   if (!signature.trim() || signature === lastCommitted) return;
   lastCommitted = signature;
+  const entry = { source, translation };
+  historyEntries.push(entry);
   appendSegment(sourceHistory, source);
   appendSegment(translationHistory, translation);
   // The two tracks are deliberately single-line.  Test their horizontal width
   // after appending: if either cannot fit, begin this sentence on fresh tracks
   // rather than letting a final word wrap onto a third visual line.
   if (trackOverflows(sourceHistory) || trackOverflows(translationHistory)) {
+    historyEntries = [entry];
     sourceHistory.replaceChildren();
     translationHistory.replaceChildren();
     appendSegment(sourceHistory, source);
     appendSegment(translationHistory, translation);
   }
+}
+
+function currentSubtitleState() {
+  return {
+    history: historyEntries.slice(-20),
+    latestInput,
+    latestOutput,
+    lastCommitted,
+  };
+}
+
+function notifySubtitleState() {
+  notifyBackground({ type: "subtitle-state", state: currentSubtitleState() });
+}
+
+function restoreSubtitleState(state) {
+  if (!state || !root || !sourceHistory || !translationHistory) return;
+  historyEntries = Array.isArray(state.history)
+    ? state.history
+        .filter(entry => entry && (entry.source || entry.translation))
+        .slice(-20)
+        .map(entry => ({ source: normalize(entry.source), translation: normalize(entry.translation) }))
+    : [];
+  sourceHistory.replaceChildren();
+  translationHistory.replaceChildren();
+  for (const entry of historyEntries) {
+    appendSegment(sourceHistory, entry.source);
+    appendSegment(translationHistory, entry.translation);
+  }
+  latestInput = normalize(state.latestInput);
+  latestOutput = normalize(state.latestOutput);
+  lastCommitted = state.lastCommitted || "";
+  reflowHistory();
+  renderPending();
 }
 
 function commitPending(force = false) {
@@ -183,7 +222,10 @@ function schedulePendingCommit() {
   // Commit the stable fragment after a short quiet period instead of leaving
   // sentence mode visually frozen.
   pendingCommitTimer = setTimeout(() => {
-    if (!disposed && !closedByUser) commitPending(true);
+    if (!disposed && !closedByUser) {
+      commitPending(true);
+      notifySubtitleState();
+    }
   }, 1200);
 }
 
@@ -203,6 +245,7 @@ function handleSubtitle(message) {
   commitPending();
   schedulePendingCommit();
   renderPending();
+  notifySubtitleState();
   notifyBackground({ type: "subtitle-rendered" });
 }
 
@@ -253,10 +296,11 @@ function endPointerAction(event) {
 messageListener = message => {
   if (disposed) return;
   if (message.type === "subtitle-start") { closedByUser = false; ensureSubtitle(); }
-  if (message.type === "subtitle-stop") { root?.remove(); clearTimeout(pendingCommitTimer); root = history = sourceHistory = translationHistory = pending = null; latestInput = latestOutput = lastCommitted = ""; }
+  if (message.type === "subtitle-stop") { root?.remove(); clearTimeout(pendingCommitTimer); root = history = sourceHistory = translationHistory = pending = null; latestInput = latestOutput = lastCommitted = ""; historyEntries = []; }
   if (message.type === "subtitle-status") return;
   if (message.type === "subtitle-settings") { if (root) setSettings(message.settings); }
   if (message.type === "subtitle-layout") { savedLayout = message.layout || null; ensureSubtitle(); applyLayout(savedLayout); reflowHistory(); renderPending(); }
+  if (message.type === "subtitle-state") { ensureSubtitle(); restoreSubtitleState(message.state); }
   if (message.type === "subtitle") handleSubtitle(message);
 };
 chrome.runtime.onMessage.addListener(messageListener);
