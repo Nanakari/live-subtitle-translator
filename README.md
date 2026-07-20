@@ -1,5 +1,7 @@
 # Live Subtitle Translator
 
+[![CI](https://github.com/Nanakari/live-subtitle-translator/actions/workflows/ci.yml/badge.svg)](https://github.com/Nanakari/live-subtitle-translator/actions/workflows/ci.yml)
+
 A Windows desktop live-subtitle translator. It captures system playback audio,
 translates it through Gemini Live, and shows an always-on-top bilingual subtitle
 window. A Chrome extension is also included for translating the audio of the
@@ -85,3 +87,16 @@ applications.
 - Never commit `config.local.yaml`, `.env`, API keys, audio recordings, logs,
   or the `.venv` directory.
 - If a key is exposed, revoke it in the provider console and create a new one.
+- Report vulnerabilities and sensitive findings according to
+  [SECURITY.md](SECURITY.md), not through a public issue.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions and the checks
+required before opening a pull request.
+
+## License
+
+No open-source license is currently granted for this repository. Public
+visibility does not by itself grant permission to copy, modify, or distribute
+the code.
