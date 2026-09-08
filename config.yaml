@@ -1,18 +1,36 @@
 app:
   title: "Gemini Live Translator"
   debug: false
+  # Optional stage timestamps; contains no audio or subtitle text.
+  log_latency_metrics: false
   log_file: "app.log"
 
 audio:
   sample_rate: 16000
   channels: 1
   chunk_ms: 100
+  # Disconnect Gemini after sustained silence, while continuing to listen
+  # locally for playback to resume.
+  silence_sleep_enabled: true
+  silence_sleep_after_seconds: 20
+  silence_rms_threshold: 0.0015
+  silence_wake_chunks: 3
+  silence_preroll_ms: 500
 
 network:
   # Leave empty for a direct connection. Put a machine-specific proxy in
   # config.local.yaml instead of editing this shared file.
   proxy_url: ""
   no_proxy: "localhost,127.0.0.1,::1"
+
+bridge:
+  # When empty, any Chrome extension origin is accepted. For stronger local
+  # isolation, put this extension's ID in config.local.yaml.
+  allowed_extension_ids: []
+  # Browser audio frames are normally about 3.2 KB at the default settings.
+  max_audio_frame_bytes: 65536
+  # Bound audio buffered while Gemini is connecting or briefly backpressured.
+  audio_queue_chunks: 50
 
 gemini:
   # Optional: paste your API key here if you do not want to use an environment variable.
@@ -28,10 +46,32 @@ gemini:
   log_transcriptions: false
   reconnect: true
   reconnect_delay_seconds: 2
+  # Keep Ping enabled for connection telemetry, but don't close an otherwise
+  # active translation stream merely because a Pong control frame is delayed.
+  websocket_ping_interval_seconds: 20
+  websocket_ping_timeout_seconds: null
+  websocket_close_timeout_seconds: 10
+  # Reconnect only when audio is actively being sent and no Gemini server data
+  # of any kind has arrived for this long.
+  server_data_timeout_seconds: 120
+  # Non-subtitle control messages can continue even when transcription has
+  # stalled. Start a fresh session when active audio produces no subtitle data.
+  subtitle_data_timeout_seconds: 45
+  # If Japanese transcription keeps arriving but Chinese output stops, the
+  # model turn is stalled even though the connection itself remains active.
+  translation_output_timeout_seconds: 45
+  # Log only Ping/Pong timing and message counters. Audio and subtitle content
+  # are deliberately excluded from these control-frame diagnostics.
+  websocket_control_logging: true
+  # Rotate the roughly 10-minute WebSocket connection gracefully without
+  # losing the underlying Live session.
+  session_resumption: true
+  # Keep long-running audio sessions from reaching their context limit.
+  context_window_compression: true
 
 subtitle:
-  # sentence: display only after a sentence is complete and paired.
-  # streaming: show incomplete pending text as it arrives.
+  # sentence: display only after a sentence is complete and paired (default).
+  # streaming: show every incomplete update as it arrives.
   display_mode: "sentence"
   # bilingual: original Japanese + Chinese translation.
   # translation: Chinese translation only.
@@ -62,22 +102,32 @@ subtitle:
   min_pending_display_chars: 12
   min_block_chars: 8
   target_line_chars: 32
-  max_pending_chars: 72
+  max_pending_chars: 180
+  # Stable output waits for complete sentences. After this soft deadline,
+  # allow a clause boundary; unfinished predicates can wait to the hard limit.
+  # Set 0 to disable time-based splitting.
+  stable_max_wait_ms: 6500
+  # Continue waiting for an unfinished predicate until this absolute limit.
+  stable_hard_max_wait_ms: 12000
+  # A stable fragment can be committed after this pause unless it looks unfinished.
+  stable_pause_ms: 1800
   log_rendered_subtitles: true
   duplicate_recent_window: 6
   duplicate_min_chars: 6
   # Pair Chinese output with the latest Japanese transcription window.
   ja_pair_window_seconds: 2.0
-  ja_pair_max_chars: 60
+  # Keep enough Japanese context for long punctuation-free Chinese segments.
+  # The compact overlay still shows only the newest suffix that fits on screen.
+  ja_pair_max_chars: 320
   ja_pair_preroll_seconds: 0.5
   ja_pair_postroll_seconds: 0.25
-  pair_commit_delay_ms: 900
+  pair_commit_delay_ms: 600
   require_bilingual_for_display: true
   max_wait_for_ja_ms: 1800
   skip_filler_subtitles: true
   filler_max_chars: 6
   # Meaningful short phrases are merged into the next sentence when possible.
-  max_short_carry_ms: 3000
+  max_short_carry_ms: 1800
   clear_ja_after_pair: true
   background_color: "#111111"
   text_color: "#ffffff"

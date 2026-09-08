@@ -1,6 +1,7 @@
 const OFFSCREEN_DOCUMENT = "offscreen.html";
 let activeTabId = null;
-const DEFAULT_SETTINGS = { displayMode: "sentence", subtitleLanguage: "bilingual" };
+const DEFAULT_SETTINGS = { displayMode: "sentence", subtitleLanguage: "bilingual", overlayScope: "captured" };
+let lifecycle = Promise.resolve();
 
 async function getLiveState() {
   const state = await chrome.storage.session.get(["translationActive", "latestSubtitle", "subtitleState"]);
@@ -92,16 +93,26 @@ async function showSubtitleInTab(tabId, latestSubtitle = null, subtitleState = n
   else if (latestSubtitle) await tellTab(tabId, latestSubtitle);
 }
 
+async function subtitleTabs() {
+  const { subtitleSettings = DEFAULT_SETTINGS } = await chrome.storage.local.get("subtitleSettings");
+  const tabId = await getActiveTabId();
+  const tabs = await chrome.tabs.query({});
+  return tabs.filter(tab => supportsSubtitleOverlay(tab) &&
+    (subtitleSettings.overlayScope === "all" || tab.id === tabId));
+}
+
 async function showSubtitleInAllTabs() {
   const { translationActive, latestSubtitle, subtitleState } = await getLiveState();
   if (!translationActive) return;
-  const tabs = await chrome.tabs.query({});
-  await Promise.all(tabs.filter(supportsSubtitleOverlay).map(tab => showSubtitleInTab(tab.id, latestSubtitle, subtitleState)));
+  const tabs = await subtitleTabs();
+  await Promise.all(tabs.map(tab => showSubtitleInTab(tab.id, latestSubtitle, subtitleState)));
 }
 
 async function broadcastToSubtitleTabs(message) {
-  const tabs = await chrome.tabs.query({});
-  await Promise.all(tabs.filter(supportsSubtitleOverlay).map(tab => tellTab(tab.id, message)));
+  const tabs = message.type === "subtitle-stop"
+    ? (await chrome.tabs.query({})).filter(supportsSubtitleOverlay)
+    : await subtitleTabs();
+  await Promise.all(tabs.map(tab => tellTab(tab.id, message)));
 }
 
 async function repairSubtitleUi() {
@@ -145,8 +156,8 @@ async function stopCaptureAndWait(tabId) {
 async function restoreSubtitleAfterNavigation(tabId) {
   const { translationActive, latestSubtitle, subtitleState } = await getLiveState();
   if (!translationActive) return;
-  const tab = await chrome.tabs.get(tabId);
-  if (supportsSubtitleOverlay(tab)) await showSubtitleInTab(tabId, latestSubtitle, subtitleState);
+  const tabs = await subtitleTabs();
+  if (tabs.some(tab => tab.id === tabId)) await showSubtitleInTab(tabId, latestSubtitle, subtitleState);
 }
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
@@ -175,6 +186,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(() => {});
     return;
   }
+  if (message.type === "capture-ended") {
+    lifecycle = lifecycle.then(async () => {
+      await setLiveState(false);
+      await setSubtitleState(null);
+      await setPluginError(message.message);
+      await broadcastToSubtitleTabs({ type: "subtitle-stop" });
+      await clearActiveTab();
+    }).catch(() => {});
+    return;
+  }
   if (message.type === "capture-error") {
     setPluginError(message.message)
       .then(() => broadcastToSubtitleTabs({ type: "subtitle-status", text: message.message }))
@@ -196,32 +217,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     repairSubtitleUi().catch(() => {});
     return;
   }
-  if (message.type === "bridge-connected" || message.type === "gemini-connected") {
+  if (message.type === "bridge-connected") {
+    repairSubtitleUi().catch(() => {});
+    return;
+  }
+  if (message.type === "gemini-connected") {
     setPluginError("").then(() => repairSubtitleUi()).catch(() => {});
     return;
   }
 
-  (async () => {
+  const operation = async () => {
     if (message.type === "start") {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab?.id) throw new Error("没有找到当前标签页。");
-      await setPluginError("");
-      await chrome.storage.session.remove(["directDiagnostics", "lastPluginError", "subtitleState"]);
-      const previousTabId = await getActiveTabId();
-      if (previousTabId) {
-        await stopCaptureAndWait(previousTabId);
+      try {
+        await setPluginError("");
+        await chrome.storage.session.remove(["directDiagnostics", "lastPluginError", "subtitleState"]);
+        await setLiveState(false);
+        const previousTabId = await getActiveTabId();
+        if (previousTabId) {
+          await stopCaptureAndWait(previousTabId);
+          await broadcastToSubtitleTabs({ type: "subtitle-stop" });
+        }
+        await ensureOffscreenDocument();
+        const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+        activeTabId = tab.id;
+        await chrome.storage.session.set({ activeTabId });
+        const captureResult = await chrome.runtime.sendMessage({ type: "start-capture", streamId });
+        if (!captureResult?.ok) {
+          throw new Error(captureResult?.error || "音频或 Gemini 连接启动失败。");
+        }
+        await setLiveState(true);
+        await showSubtitleInAllTabs();
+        sendResponse({ ok: true });
+      } catch (error) {
+        await setLiveState(false);
+        await chrome.storage.session.remove("subtitleState");
+        await setPluginError(error.message);
+        chrome.runtime.sendMessage({ type: "stop-capture" }).catch(() => {});
         await broadcastToSubtitleTabs({ type: "subtitle-stop" });
+        await clearActiveTab();
+        throw error;
       }
-      await ensureOffscreenDocument();
-      const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-      activeTabId = tab.id;
-      await chrome.storage.session.set({ activeTabId });
-      await setLiveState(true);
-      await showSubtitleInAllTabs();
-      // Offscreen documents do not send a response to this one-way command.
-      // Do not await it, otherwise the service worker can wait on its own listener.
-      chrome.runtime.sendMessage({ type: "start-capture", streamId }).catch(() => {});
-      sendResponse({ ok: true });
     } else if (message.type === "stop") {
       const captureTabId = await getActiveTabId();
       await setLiveState(false);
@@ -235,9 +272,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === "settings") {
       await chrome.storage.local.set({ subtitleSettings: { ...DEFAULT_SETTINGS, ...message.settings } });
       const { translationActive } = await getLiveState();
-      if (translationActive) await broadcastToSubtitleTabs({ type: "subtitle-settings", settings: message.settings });
+      if (translationActive) {
+        await broadcastToSubtitleTabs({ type: "subtitle-stop" });
+        await showSubtitleInAllTabs();
+      }
       sendResponse({ ok: true });
     }
-  })().catch(error => sendResponse({ ok: false, error: error.message }));
+  };
+  lifecycle = lifecycle.then(operation).catch(error => sendResponse({ ok: false, error: error.message }));
   return true;
 });

@@ -4,5 +4,7 @@ __pycache__/
 app.log
 *.log
 config.local.yaml
+desktop_state.json
+desktop_state.json.tmp
 .env
 *.wav

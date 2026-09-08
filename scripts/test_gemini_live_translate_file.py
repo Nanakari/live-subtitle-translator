@@ -75,6 +75,29 @@ async def run(path: Path) -> None:
         sample_rate=SAMPLE_RATE,
         logger=logger,
         reconnect=False,
+        websocket_ping_interval_seconds=float(
+            gemini_cfg.get("websocket_ping_interval_seconds", 20)
+        ),
+        websocket_ping_timeout_seconds=(
+            None
+            if gemini_cfg.get("websocket_ping_timeout_seconds") is None
+            else float(gemini_cfg["websocket_ping_timeout_seconds"])
+        ),
+        websocket_close_timeout_seconds=float(
+            gemini_cfg.get("websocket_close_timeout_seconds", 10)
+        ),
+        websocket_control_logging=bool(
+            gemini_cfg.get("websocket_control_logging", True)
+        ),
+        server_data_timeout_seconds=float(
+            gemini_cfg.get("server_data_timeout_seconds", 120)
+        ),
+        subtitle_data_timeout_seconds=float(
+            gemini_cfg.get("subtitle_data_timeout_seconds", 45)
+        ),
+        translation_output_timeout_seconds=float(
+            gemini_cfg.get("translation_output_timeout_seconds", 45)
+        ),
     )
     chunks = chunk_bytes(load_wav_as_pcm16(path))
 

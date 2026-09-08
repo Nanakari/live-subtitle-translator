@@ -14,7 +14,12 @@ class PcmProcessor extends AudioWorkletProcessor {
       if (source) output[channel].set(source);
     }
 
-    const mono = input[0];
+    const mono = input[0] && new Float32Array(input[0].length);
+    if (mono) {
+      for (const channel of input) {
+        for (let i = 0; i < mono.length; i++) mono[i] += channel[i] / input.length;
+      }
+    }
     if (mono?.length) {
       this.parts.push(new Float32Array(mono));
       this.length += mono.length;

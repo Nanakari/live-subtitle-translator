@@ -249,6 +249,17 @@ function handleSubtitle(message) {
   notifyBackground({ type: "subtitle-rendered" });
 }
 
+function showStatus(text) {
+  if (closedByUser) return;
+  ensureSubtitle();
+  if (!pending) return;
+  pending.replaceChildren();
+  const status = document.createElement("div");
+  status.className = "glt-status";
+  status.textContent = normalize(text);
+  pending.append(status);
+}
+
 function edgeAt(event) {
   const rect = root.getBoundingClientRect(); const gap = 15;
   return { left: event.clientX - rect.left < gap, right: rect.right - event.clientX < gap, top: event.clientY - rect.top < gap, bottom: rect.bottom - event.clientY < gap };
@@ -297,7 +308,7 @@ messageListener = message => {
   if (disposed) return;
   if (message.type === "subtitle-start") { closedByUser = false; ensureSubtitle(); }
   if (message.type === "subtitle-stop") { root?.remove(); clearTimeout(pendingCommitTimer); root = history = sourceHistory = translationHistory = pending = null; latestInput = latestOutput = lastCommitted = ""; historyEntries = []; }
-  if (message.type === "subtitle-status") return;
+  if (message.type === "subtitle-status") showStatus(message.text);
   if (message.type === "subtitle-settings") { if (root) setSettings(message.settings); }
   if (message.type === "subtitle-layout") { savedLayout = message.layout || null; ensureSubtitle(); applyLayout(savedLayout); reflowHistory(); renderPending(); }
   if (message.type === "subtitle-state") { ensureSubtitle(); restoreSubtitleState(message.state); }

@@ -17,7 +17,7 @@ if not exist ".venv\Scripts\python.exe" (
 call ".venv\Scripts\activate.bat"
 
 echo Checking dependencies...
-python -c "import google.genai, numpy, soundcard, soundfile, scipy, yaml" >nul 2>nul
+python -c "import google.genai, numpy, soundcard, soundfile, scipy, yaml, pystray, PIL" >nul 2>nul
 
 if errorlevel 1 (
     echo Installing dependencies...
