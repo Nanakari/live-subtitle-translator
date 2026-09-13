@@ -4,14 +4,13 @@ chcp 65001 >nul
 
 cd /d "%~dp0"
 
-py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
-if errorlevel 1 (
-    echo Python 3.10 or later is required for the current dependencies.
-    call :handle_error
-    exit /b 1
-)
-
 if not exist ".venv\Scripts\python.exe" (
+    py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+    if errorlevel 1 (
+        echo Python 3.10 or later is required for the current dependencies.
+        call :handle_error
+        exit /b 1
+    )
     echo Creating virtual environment...
     py -3 -m venv .venv
     if errorlevel 1 (
