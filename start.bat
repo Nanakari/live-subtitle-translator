@@ -4,6 +4,13 @@ chcp 65001 >nul
 
 cd /d "%~dp0"
 
+py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo Python 3.10 or later is required for the current dependencies.
+    call :handle_error
+    exit /b 1
+)
+
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment...
     py -3 -m venv .venv
@@ -15,6 +22,13 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 call ".venv\Scripts\activate.bat"
+
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" >nul 2>nul
+if errorlevel 1 (
+    echo The existing .venv uses Python older than 3.10. Recreate it with Python 3.10 or later.
+    call :handle_error
+    exit /b 1
+)
 
 echo Checking dependencies...
 python -c "import google.genai, numpy, soundcard, soundfile, scipy, yaml, pystray, PIL" >nul 2>nul

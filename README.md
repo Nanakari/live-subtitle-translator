@@ -9,7 +9,7 @@ window.
 ## Requirements
 
 - Windows 10 or later
-- Python 3.9 or later
+- Python 3.10 or later
 - A Gemini API key with access to the configured Live model
 
 ## Quick start: desktop app
