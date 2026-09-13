@@ -5,4 +5,4 @@ soundfile==0.13.1
 scipy==1.13.1
 PyYAML==6.0.3
 pystray==0.19.5
-Pillow==11.3.0
+Pillow==12.3.0
