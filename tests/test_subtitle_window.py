@@ -19,6 +19,87 @@ class SubtitleWindowTests(unittest.TestCase):
         append.assert_called_once_with("It is a happy thing, so I am happy.", "这是开心的事，所以我很开心。")
         self.assertEqual(window._ja_fragments, [])
 
+    def test_timeout_fragment_waits_for_grace_and_merges_late_continuation(self) -> None:
+        window = self.make_window()
+        window._current_zh = ""
+        window._ja_fragments = []
+        window.config.require_bilingual_for_display = False
+        window.config.pair_commit_delay_ms = 300
+        window.config.timeout_commit_grace_ms = 700
+        window._pending_zh_segments = [
+            (10.0, 10.0, 10.1, "这个能行", True),
+        ]
+        with patch.object(window, "_append_block", return_value=True) as append:
+            with patch("src.subtitle_window.time.monotonic", return_value=10.9):
+                self.assertFalse(window._flush_ready_segments())
+            window._pending_zh_segments.append((10.8, 10.8, 10.9, "吗？"))
+            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+                self.assertTrue(window._flush_ready_segments())
+        append.assert_called_once_with("", "这个能行吗？")
+
+    def test_turn_complete_bypasses_timeout_grace(self) -> None:
+        window = self.make_window()
+        window._current_zh = ""
+        window._ja_fragments = []
+        window.config.require_bilingual_for_display = False
+        window.config.pair_commit_delay_ms = 3000
+        window.config.timeout_commit_grace_ms = 700
+        window._turn_complete_pending = True
+        window._pending_zh_segments = [
+            (10.0, 10.0, 10.1, "这个能行", True),
+        ]
+        with patch.object(window, "_append_block", return_value=True) as append:
+            with patch("src.subtitle_window.time.monotonic", return_value=10.1):
+                self.assertTrue(window._flush_ready_segments())
+        append.assert_called_once_with("", "这个能行")
+
+    def test_low_confidence_source_is_hidden_for_short_translation(self) -> None:
+        window = self.make_window()
+        window._current_zh = ""
+        window._ja_fragments = [(10.0, "これは前の長い原文コンテキストが残っています。")]
+        window.config.require_bilingual_for_display = False
+        window._pending_zh_segments = [(10.0, 10.0, 10.1, "吧")]
+
+        with patch.object(window, "_append_block", return_value=True) as append:
+            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+                self.assertTrue(window._flush_ready_segments())
+
+        append.assert_called_once_with("", "吧", force=True)
+        self.assertEqual(window._ja_fragments, [])
+
+    def test_turn_boundary_resets_source_before_next_turn(self) -> None:
+        window = self.make_window()
+        window._current_zh = ""
+        window._ja_fragments = []
+
+        with patch.object(window, "_append_block", return_value=True) as append:
+            with patch("src.subtitle_window.time.monotonic", return_value=10.0):
+                window._consume_update(
+                    "bilingual",
+                    "第一原文。",
+                    "第一句。",
+                    turn_complete=True,
+                )
+                self.assertTrue(window._finish_turn_boundary())
+
+            self.assertEqual(window._ja_fragments, [])
+            self.assertIsNone(window._source_tail)
+            self.assertIsNone(window._source_continuation)
+
+            with patch("src.subtitle_window.time.monotonic", return_value=20.0):
+                window._consume_update(
+                    "bilingual",
+                    None,
+                    "第二句。",
+                    turn_complete=True,
+                )
+                self.assertTrue(window._finish_turn_boundary())
+
+        self.assertEqual(
+            [call.args for call in append.call_args_list],
+            [("第一原文。", "第一句。"), ("", "第二句。")],
+        )
+
     def test_late_continuation_retains_source_context(self) -> None:
         window = self.make_window()
         window._current_zh = ""
@@ -27,13 +108,54 @@ class SubtitleWindowTests(unittest.TestCase):
         with patch.object(window, "_append_block", return_value=True) as append:
             with patch("src.subtitle_window.time.monotonic", return_value=11.0):
                 window._flush_ready_segments()
+            window._history = [{"ja": "It is a happy thing, so I am happy.", "zh": "这是开心的事，"}]
             window._pending_zh_segments = [(12.0, 10.1, 12.0, "所以我很开心。")]
             with patch("src.subtitle_window.time.monotonic", return_value=13.0):
                 window._flush_ready_segments()
         self.assertEqual(len(append.call_args_list), 2)
-        self.assertEqual(append.call_args_list[1].args[0], "It is a happy thing, so I am happy.")
+        # The full source context is retained internally for pairing, but the
+        # already-rendered prefix is not shown a second time.
+        self.assertEqual(append.call_args_list[1].args[0], "")
         self.assertEqual(window._ja_fragments, [])
         self.assertIsNone(window._source_continuation)
+
+    def test_continuation_displays_only_new_source_suffix(self) -> None:
+        window = self.make_window()
+        window._history = [{"ja": "これは前半です。", "zh": "这是前半句。"}]
+        window._source_continuation = (10.1, "これは前半です。")
+
+        self.assertEqual(
+            window._source_text_for_display("これは前半です。後半です。"),
+            "後半です。",
+        )
+
+    def test_late_continuation_does_not_duplicate_previous_source_prefix(self) -> None:
+        window = self.make_window()
+        window._source_continuation = (10.1, "何では岩じゃな")
+        window._ja_fragments = [(10.0, "何では岩じゃな"), (11.0, "い 。")]
+
+        paired = window._ja_text_for_range(10.1, 11.1, 11.1)
+
+        self.assertEqual(paired, "何では岩じゃない 。")
+
+    def test_turn_complete_commits_without_waiting_for_pair_delay(self) -> None:
+        window = self.make_window()
+        window._current_zh = ""
+        window._ja_fragments = []
+        window.config.pair_commit_delay_ms = 6000
+
+        with patch("src.subtitle_window.time.monotonic", return_value=20.0):
+            with patch.object(window, "_append_block", return_value=True) as append:
+                window._consume_update(
+                    "bilingual",
+                    "これは文です。",
+                    "这是句子。",
+                    turn_complete=True,
+                )
+                self.assertTrue(window._turn_complete_pending)
+                self.assertTrue(window._flush_ready_segments())
+
+        append.assert_called_once_with("これは文です。", "这是句子。")
 
     def test_first_translation_does_not_consume_next_complete_source_sentence(self) -> None:
         window = self.make_window()
@@ -101,6 +223,7 @@ class SubtitleWindowTests(unittest.TestCase):
         self.assertFalse(window._flush_stale_stable_segment(now=21.9))
         self.assertTrue(window._flush_stale_stable_segment(now=22.0))
         self.assertEqual(window._pending_zh_segments[0][3], "我觉得它会")
+        self.assertFalse(window._pending_zh_segments[0][4])
 
     def test_pause_can_release_complete_phrase_before_soft_deadline(self) -> None:
         window = self.make_window()
@@ -108,6 +231,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._current_zh_changed_at = 11.0
         self.assertFalse(window._flush_stale_stable_segment(now=12.0))
         self.assertTrue(window._flush_stale_stable_segment(now=13.0))
+        self.assertTrue(window._pending_zh_segments[0][4])
 
     def test_sentence_mode_does_not_split_on_comma_just_for_length(self) -> None:
         window = self.make_window()
@@ -133,6 +257,23 @@ class SubtitleWindowTests(unittest.TestCase):
         complete, pending = window._split_complete_segments("Dr. Smith paid 3.14 dollars. Next")
         self.assertEqual(complete, ["Dr. Smith paid 3.14 dollars."])
         self.assertEqual(pending, "Next")
+
+    def test_display_replaces_sentence_periods_but_keeps_decimal_points(self) -> None:
+        self.assertEqual(
+            SubtitleWindow._display_text("原文。Next. 3.14｡"),
+            "原文 Next 3.14",
+        )
+
+    def test_render_items_replace_periods_without_mutating_pairing_history(self) -> None:
+        window = self.make_window()
+        window._history = [{"ja": "Original. Next.", "zh": "原文。下一句。"}]
+
+        self.assertEqual(
+            window._build_render_items(),
+            [("Original Next", "ja"), ("原文 下一句", "zh")],
+        )
+        self.assertEqual(window._history[0]["ja"], "Original. Next.")
+        self.assertEqual(window._history[0]["zh"], "原文。下一句。")
 
     def test_repeated_topic_is_not_removed_from_a_new_source_sentence(self) -> None:
         window = self.make_window()
@@ -194,6 +335,10 @@ class SubtitleWindowTests(unittest.TestCase):
         window._current_zh_changed_at = 12.0
         window._ja_fragments = [(10.0, "これは連続した音声です")]
         window._pending_zh_segments = []
+        window._carry_ja = ""
+        window._carry_zh = ""
+        window._carry_started_at = None
+        window._status = ""
         return window
 
     def test_removed_balanced_mode_migrates_to_stable_output(self) -> None:

@@ -23,15 +23,6 @@ network:
   proxy_url: ""
   no_proxy: "localhost,127.0.0.1,::1"
 
-bridge:
-  # When empty, any Chrome extension origin is accepted. For stronger local
-  # isolation, put this extension's ID in config.local.yaml.
-  allowed_extension_ids: []
-  # Browser audio frames are normally about 3.2 KB at the default settings.
-  max_audio_frame_bytes: 65536
-  # Bound audio buffered while Gemini is connecting or briefly backpressured.
-  audio_queue_chunks: 50
-
 gemini:
   # Optional: paste your API key here if you do not want to use an environment variable.
   # Warning: config.yaml is plain text. Do not share or commit it with a real API key.
@@ -102,15 +93,18 @@ subtitle:
   min_pending_display_chars: 12
   min_block_chars: 8
   target_line_chars: 32
-  max_pending_chars: 180
+  max_pending_chars: 140
   # Stable output waits for complete sentences. After this soft deadline,
   # allow a clause boundary; unfinished predicates can wait to the hard limit.
   # Set 0 to disable time-based splitting.
-  stable_max_wait_ms: 6500
+  stable_max_wait_ms: 4000
   # Continue waiting for an unfinished predicate until this absolute limit.
-  stable_hard_max_wait_ms: 12000
+  stable_hard_max_wait_ms: 8000
   # A stable fragment can be committed after this pause unless it looks unfinished.
-  stable_pause_ms: 1800
+  stable_pause_ms: 1000
+  # Timeout-split fragments wait this extra time for a continuation to merge.
+  # Complete sentences keep pair_commit_delay_ms; turn_complete commits immediately.
+  timeout_commit_grace_ms: 700
   log_rendered_subtitles: true
   duplicate_recent_window: 6
   duplicate_min_chars: 6
@@ -121,13 +115,17 @@ subtitle:
   ja_pair_max_chars: 320
   ja_pair_preroll_seconds: 0.5
   ja_pair_postroll_seconds: 0.25
-  pair_commit_delay_ms: 600
+  # Hide source text when it is implausibly long for the current translation;
+  # this prevents stale context from appearing as a bilingual pair.
+  max_source_to_translation_ratio: 3.0
+  max_source_overhang_chars: 12
+  pair_commit_delay_ms: 300
   require_bilingual_for_display: true
-  max_wait_for_ja_ms: 1800
+  max_wait_for_ja_ms: 900
   skip_filler_subtitles: true
   filler_max_chars: 6
   # Meaningful short phrases are merged into the next sentence when possible.
-  max_short_carry_ms: 1800
+  max_short_carry_ms: 1000
   clear_ja_after_pair: true
   background_color: "#111111"
   text_color: "#ffffff"

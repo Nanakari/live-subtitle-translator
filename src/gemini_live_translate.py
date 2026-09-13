@@ -22,6 +22,10 @@ class TranslationEvent:
     input_text: str | None = None
     output_text: str | None = None
     error: str | None = None
+    # Gemini sends this control bit when the current model turn is complete.
+    # Keeping it alongside the transcription lets the UI commit a stable
+    # sentence without waiting for a heuristic timeout.
+    turn_complete: bool = False
 
 
 @dataclass
@@ -426,6 +430,11 @@ class GeminiLiveTranslator:
 
         input_text = self._transcription_text(getattr(server_content, "input_transcription", None))
         output_text = self._transcription_text(getattr(server_content, "output_transcription", None))
+        turn_complete = bool(getattr(server_content, "turn_complete", False))
+        if isinstance(server_content, dict):
+            turn_complete = bool(
+                server_content.get("turn_complete", server_content.get("turnComplete", False))
+            )
 
         model_turn = getattr(server_content, "model_turn", None)
         if model_turn:
@@ -433,8 +442,12 @@ class GeminiLiveTranslator:
                 if getattr(part, "inline_data", None):
                     continue
 
-        if input_text or output_text:
-            return TranslationEvent(input_text=input_text, output_text=output_text)
+        if input_text or output_text or turn_complete:
+            return TranslationEvent(
+                input_text=input_text,
+                output_text=output_text,
+                turn_complete=turn_complete,
+            )
         return None
 
     @staticmethod

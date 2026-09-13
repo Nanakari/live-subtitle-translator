@@ -148,6 +148,24 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(translator._resumption_handle, "resume-token")
         self.assertEqual(translator._process_control_message(go_away_message), "50s")
 
+    async def test_turn_complete_is_carried_from_server_content(self) -> None:
+        translator = GeminiLiveTranslator(api_key="test")
+        message = SimpleNamespace(
+            server_content=SimpleNamespace(
+                input_transcription=SimpleNamespace(text="こんにちは"),
+                output_transcription=SimpleNamespace(text="你好"),
+                turn_complete=True,
+                model_turn=None,
+            )
+        )
+
+        event = translator._message_to_event(message)
+
+        self.assertIsNotNone(event)
+        self.assertTrue(event.turn_complete)
+        self.assertEqual(event.input_text, "こんにちは")
+        self.assertEqual(event.output_text, "你好")
+
     async def test_go_away_rotates_before_abort_and_uses_resumption_handle(self) -> None:
         update = SimpleNamespace(
             session_resumption_update=SimpleNamespace(

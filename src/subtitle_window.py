@@ -48,6 +48,8 @@ class SubtitleWindowConfig:
     stable_max_wait_ms: int = 6500
     stable_hard_max_wait_ms: int = 12000
     stable_pause_ms: int = 1800
+    # Timeout-split fragments get this extra merge window before display.
+    timeout_commit_grace_ms: int = 700
     log_latency_metrics: bool = False
     log_rendered_subtitles: bool = False
     duplicate_recent_window: int = 6
@@ -56,6 +58,11 @@ class SubtitleWindowConfig:
     ja_pair_max_chars: int = 320
     ja_pair_preroll_seconds: float = 0.5
     ja_pair_postroll_seconds: float = 0.25
+    # Do not show a source block that is implausibly long for its translation.
+    # This protects against stale source context being paired with a short
+    # timeout fragment such as "吧".
+    max_source_to_translation_ratio: float = 3.0
+    max_source_overhang_chars: int = 12
     pair_commit_delay_ms: int = 600
     require_bilingual_for_display: bool = True
     max_wait_for_ja_ms: int = 1800
@@ -93,7 +100,7 @@ class SubtitleWindow:
         # Gemini can briefly burst events after a reconnect.  A bounded queue
         # and batched draining keep the Tk main thread responsive to redraws
         # and the close button instead of processing an endless backlog.
-        self._queue: queue.Queue[tuple[str, str | None, str | None]] = queue.Queue(maxsize=200)
+        self._queue: queue.Queue[tuple[str, str | None, str | None, bool]] = queue.Queue(maxsize=200)
         self._drag_x = 0
         self._drag_y = 0
         self._resize_start: tuple[int, int, int, int] | None = None
@@ -120,10 +127,11 @@ class SubtitleWindow:
         self._current_zh = ""
         self._current_zh_started_at: float | None = None
         self._current_zh_changed_at: float | None = None
+        self._turn_complete_pending = False
         self._carry_ja = ""
         self._carry_zh = ""
         self._carry_started_at: float | None = None
-        self._pending_zh_segments: list[tuple[float, float, float, str]] = []
+        self._pending_zh_segments: list[tuple[float, float, float, str, bool]] = []
         self._status = ""
         self._recent_blocks: list[tuple[str, str]] = []
         self._last_render_text = ""
@@ -158,7 +166,7 @@ class SubtitleWindow:
         self.compact_source_font = tkfont.Font(
             family="Segoe UI",
             # Tk positive sizes are points; CSS uses pixels.  Negative Tk
-            # sizes preserve the extension's 16px / 17px visual scale.
+            # sizes preserve the compact overlay's 16px / 17px visual scale.
             size=-max(1, config.compact_font_size - 1),
             weight="normal",
         )
@@ -299,26 +307,31 @@ class SubtitleWindow:
         self.root.after(self.config.render_interval_ms, self._poll_text)
 
     def set_text(self, text: str) -> None:
-        self._enqueue(("status" if self._is_status_text(text) else "zh", None, text))
+        self._enqueue(("status" if self._is_status_text(text) else "zh", None, text, False))
 
     def set_bilingual(
         self,
         input_text: str | None = None,
         output_text: str | None = None,
+        turn_complete: bool = False,
     ) -> None:
         self._log_latency("ui_enqueued")
-        self._enqueue(("bilingual", input_text, output_text))
+        self._enqueue(("bilingual", input_text, output_text, bool(turn_complete)))
 
     def set_paused(self, paused: bool) -> None:
-        self._enqueue(("paused", None, "1" if paused else "0"))
+        self._enqueue(("paused", None, "1" if paused else "0", False))
 
     def request_visibility(self, visible: bool) -> None:
-        self._enqueue(("visibility", None, "1" if visible else "0"))
+        self._enqueue(("visibility", None, "1" if visible else "0", False))
 
     def request_close(self) -> None:
-        self._enqueue(("close", None, None))
+        self._enqueue(("close", None, None, False))
 
-    def _enqueue(self, item: tuple[str, str | None, str | None]) -> None:
+    def reset_pairing(self) -> None:
+        """Drop source/translation pairing context before a new session."""
+        self._enqueue(("reset_pairing", None, None, False))
+
+    def _enqueue(self, item: tuple[str, str | None, str | None, bool]) -> None:
         try:
             self._queue.put_nowait(item)
         except queue.Full:
@@ -561,13 +574,32 @@ class SubtitleWindow:
             # especially the close button, are never starved by a reconnect.
             for _ in range(50):
                 try:
-                    kind, ja_text, zh_text = self._queue.get_nowait()
+                    item = self._queue.get_nowait()
                 except queue.Empty:
                     break
-                changed = self._consume_update(kind, ja_text, zh_text) or changed
+                if len(item) == 3:
+                    # Keep tests and old in-process callers tolerant of the
+                    # pre-turn-boundary queue shape.
+                    kind, ja_text, zh_text = item  # type: ignore[misc]
+                    turn_complete = False
+                else:
+                    kind, ja_text, zh_text, turn_complete = item
+                changed = self._consume_update(
+                    kind,
+                    ja_text,
+                    zh_text,
+                    turn_complete=turn_complete,
+                ) or changed
+                if turn_complete:
+                    changed = self._finish_turn_boundary() or changed
             changed = self._flush_stale_stable_segment() or changed
             changed = self._flush_ready_segments() or changed
-            changed = self._flush_stale_carry() or changed
+            if getattr(self, "_turn_complete_pending", False) and not self._pending_zh_segments:
+                changed = self._flush_stale_carry(force=True) or changed
+                self._reset_pairing_state()
+                self._turn_complete_pending = False
+            else:
+                changed = self._flush_stale_carry() or changed
             if changed:
                 self._render_history()
                 self._log_latency("ui_updated")
@@ -585,6 +617,7 @@ class SubtitleWindow:
         kind: str,
         ja_text: str | None,
         zh_text: str | None,
+        turn_complete: bool = False,
     ) -> bool:
         if kind == "paused":
             paused = zh_text == "1"
@@ -599,6 +632,10 @@ class SubtitleWindow:
             return False
         if kind == "close":
             self.close()
+            return False
+        if kind == "reset_pairing":
+            self._reset_pairing_state()
+            self._turn_complete_pending = False
             return False
         if kind == "status":
             self._status = self._normalize(zh_text)
@@ -638,6 +675,39 @@ class SubtitleWindow:
             self._current_zh_started_at = None
             self._current_zh_changed_at = None
             changed = True
+        if turn_complete:
+            changed = self._finalize_current_turn() or changed
+        return changed
+
+    def _finalize_current_turn(self) -> bool:
+        """Queue the current turn for immediate stable pairing.
+
+        A Live turn-complete marker is stronger than punctuation heuristics:
+        the model has stopped revising this turn, so sentence mode can commit
+        it without waiting for the long-segment timeout.
+        """
+        self._turn_complete_pending = True
+        if not self._current_zh:
+            return bool(self._pending_zh_segments)
+        now = time.monotonic()
+        self._queue_zh_segment(
+            self._current_zh,
+            self._current_zh_started_at or now,
+            now,
+        )
+        self._current_zh = ""
+        self._current_zh_started_at = None
+        self._current_zh_changed_at = None
+        return True
+
+    def _finish_turn_boundary(self) -> bool:
+        """Commit this turn, then prevent its source from leaking into the next."""
+        changed = self._flush_ready_segments()
+        if self._pending_zh_segments:
+            return changed
+        changed = self._flush_stale_carry(force=True) or changed
+        self._reset_pairing_state()
+        self._turn_complete_pending = False
         return changed
 
     def _consume_stream(self, previous: str, incoming: str) -> tuple[list[str], str]:
@@ -676,13 +746,46 @@ class SubtitleWindow:
         self._log_subtitle("buffer_ja", ja=addition)
         return True
 
-    def _queue_zh_segment(self, text: str, start_at: float, end_at: float) -> None:
+    @staticmethod
+    def _pending_zh_values(item: tuple) -> tuple[float, float, float, str, bool]:
+        """Read both current and legacy four-field pending segment tuples."""
+        queued_at, start_at, end_at, zh_text = item[:4]
+        provisional = bool(item[4]) if len(item) > 4 else False
+        return queued_at, start_at, end_at, zh_text, provisional
+
+    def _queue_zh_segment(
+        self,
+        text: str,
+        start_at: float,
+        end_at: float,
+        provisional: bool = False,
+    ) -> None:
         zh = self._normalize(text)
         if not zh:
             return
-        self._pending_zh_segments.append((time.monotonic(), start_at, end_at, zh))
-        self._log_subtitle("queue_zh", zh=zh)
+        self._pending_zh_segments.append(
+            (time.monotonic(), start_at, end_at, zh, bool(provisional))
+        )
+        self._log_subtitle(
+            "queue_zh",
+            zh=zh,
+            provisional="1" if provisional else "",
+        )
         self._log_latency("subtitle_queued")
+
+    def _pending_commit_delay(self, provisional: bool) -> float:
+        if getattr(self, "_turn_complete_pending", False):
+            return 0.0
+        delay = max(0, self.config.pair_commit_delay_ms) / 1000
+        if provisional:
+            delay += max(0, self.config.timeout_commit_grace_ms) / 1000
+        return delay
+
+    def _reset_pairing_state(self) -> None:
+        """Clear source context without touching already queued translations."""
+        self._ja_fragments = []
+        self._source_tail = None
+        self._source_continuation = None
 
     def _flush_stale_stable_segment(self, now: float | None = None) -> bool:
         """Commit an immutable chunk when a punctuation-free segment runs long."""
@@ -721,7 +824,15 @@ class SubtitleWindow:
             return False
 
         segment_start = self._current_zh_started_at
-        self._queue_zh_segment(segment, segment_start, now)
+        # A soft/pause split is provisional: give a continuation a short
+        # chance to arrive and merge before rendering it.  A hard deadline
+        # remains hard so the configured upper bound is not extended.
+        self._queue_zh_segment(
+            segment,
+            segment_start,
+            now,
+            provisional=age < hard_wait,
+        )
         self._current_zh = remaining
         self._current_zh_started_at = now if remaining else None
         self._current_zh_changed_at = now if remaining else None
@@ -735,14 +846,23 @@ class SubtitleWindow:
             return False
         changed = False
         now = time.monotonic()
-        delay = max(0, self.config.pair_commit_delay_ms) / 1000
-        while self._pending_zh_segments and now - self._pending_zh_segments[0][0] >= delay:
-            queued_at, start_at, end_at, zh_segment = self._pending_zh_segments[0]
+        while self._pending_zh_segments:
+            queued_at, start_at, end_at, zh_segment, provisional = self._pending_zh_values(
+                self._pending_zh_segments[0]
+            )
+            delay = self._pending_commit_delay(provisional)
+            if now - queued_at < delay:
+                break
             # A timeout prefix and its continuation often arrive within the
-            # same UI tick. Pair them together before consuming any source.
+            # same UI tick. Provisional timeout prefixes also get a short
+            # grace window for a continuation that arrives after the source
+            # timing window has moved on.
             while not self._ends_sentence(zh_segment) and len(self._pending_zh_segments) > 1:
-                next_queued, next_start, next_end, next_text = self._pending_zh_segments[1]
-                if next_start > end_at + self.config.ja_pair_postroll_seconds:
+                next_queued, next_start, next_end, next_text, _ = self._pending_zh_values(
+                    self._pending_zh_segments[1]
+                )
+                within_timeout_grace = provisional and next_queued <= queued_at + delay
+                if not within_timeout_grace and next_start > end_at + self.config.ja_pair_postroll_seconds:
                     break
                 merged = self._merge_overlap(zh_segment, next_text)
                 if len(merged) > self.config.max_pending_chars:
@@ -750,7 +870,13 @@ class SubtitleWindow:
                 zh_segment = merged
                 end_at = max(end_at, next_end)
                 self._pending_zh_segments.pop(1)
-                self._pending_zh_segments[0] = (queued_at, start_at, end_at, zh_segment)
+                self._pending_zh_segments[0] = (
+                    queued_at,
+                    start_at,
+                    end_at,
+                    zh_segment,
+                    provisional,
+                )
             ja_text = self._ja_text_for_range(start_at, end_at, now)
             # Keep the unfinished beginning of the next source sentence for
             # the next translation, including tails within the same packet.
@@ -762,13 +888,41 @@ class SubtitleWindow:
                 if boundary >= 0 and ja_text[boundary + 1:].strip():
                     paired_source = ja_text[:boundary + 1].strip()
             max_wait = max(0, self.config.max_wait_for_ja_ms) / 1000
-            if self.config.require_bilingual_for_display and not ja_text and now - queued_at < max_wait:
+            if (
+                self.config.require_bilingual_for_display
+                and not ja_text
+                and not getattr(self, "_turn_complete_pending", False)
+                and now - queued_at < max_wait
+            ):
                 break
             self._pending_zh_segments.pop(0)
-            self._log_subtitle("pair_candidate", ja=paired_source, zh=zh_segment)
-            rendered = self._append_block(paired_source, zh_segment)
+            display_source = self._source_text_for_display(paired_source)
+            source_confident, source_reason = self._source_pair_confidence(
+                display_source,
+                zh_segment,
+            )
+            if display_source and not source_confident:
+                self._log_subtitle(
+                    "reject_low_confidence_source",
+                    ja=display_source,
+                    zh=zh_segment,
+                    reason=source_reason,
+                )
+                display_source = ""
+                self._carry_ja = ""
+                self._carry_zh = ""
+                self._carry_started_at = None
+            self._log_subtitle("pair_candidate", ja=display_source, zh=zh_segment)
+            if source_confident:
+                rendered = self._append_block(display_source, zh_segment)
+            else:
+                # Do not let a rejected short block become carry context for
+                # a later, unrelated source fragment.
+                rendered = self._append_block(display_source, zh_segment, force=True)
             changed = rendered or changed
-            if self.config.clear_ja_after_pair:
+            if not source_confident:
+                self._reset_pairing_state()
+            elif self.config.clear_ja_after_pair:
                 if self._ends_sentence(zh_segment):
                     self._consume_paired_ja(paired_source, end_at)
                     self._source_continuation = None
@@ -778,11 +932,60 @@ class SubtitleWindow:
                     self._source_continuation = (end_at, paired_source)
         return changed
 
-    def _flush_stale_carry(self) -> bool:
+    def _source_pair_confidence(
+        self,
+        source: str,
+        translation: str,
+    ) -> tuple[bool, str]:
+        """Reject source text that is likely stale context for this translation."""
+        source_compact = self._compact(source)
+        translation_compact = self._compact(translation)
+        if not source_compact:
+            return True, ""
+
+        translation_length = max(1, len(translation_compact))
+        max_source_length = max(
+            self.config.max_source_overhang_chars,
+            int(
+                translation_length * max(1.0, self.config.max_source_to_translation_ratio)
+                + self.config.max_source_overhang_chars
+            ),
+        )
+        if len(source_compact) > max_source_length:
+            return False, "source_overlong"
+
+        continuation = getattr(self, "_source_continuation", None)
+        if continuation is not None:
+            _, previous_source = continuation
+            if source_compact == self._compact(previous_source):
+                return False, "stale_continuation"
+        return True, ""
+
+    def _source_text_for_display(self, paired_source: str) -> str:
+        """Avoid displaying a continuation's already-rendered source prefix.
+
+        The full source context is still used for alignment and consumption,
+        but repeating it in every continuation block makes stable bilingual
+        subtitles look duplicated. Only the newly arrived suffix is rendered
+        once the previous context is already present in history.
+        """
+        continuation = getattr(self, "_source_continuation", None)
+        if not continuation or not paired_source:
+            return paired_source
+        _, previous_source = continuation
+        if not previous_source or not self._is_recent_text(previous_source, "ja"):
+            return paired_source
+        normalized_source = self._normalize(paired_source)
+        normalized_previous = self._normalize(previous_source)
+        if normalized_source.startswith(normalized_previous):
+            return normalized_source[len(normalized_previous) :].strip()
+        return paired_source
+
+    def _flush_stale_carry(self, force: bool = False) -> bool:
         if not (self._carry_ja or self._carry_zh) or self._carry_started_at is None:
             return False
         max_wait = max(0, self.config.max_short_carry_ms) / 1000
-        if time.monotonic() - self._carry_started_at < max_wait:
+        if not force and time.monotonic() - self._carry_started_at < max_wait:
             return False
         ja = self._carry_ja
         zh = self._carry_zh
@@ -951,7 +1154,10 @@ class SubtitleWindow:
                 source_parts.append(pending_ja)
             if self._show_translation_text and self._current_zh:
                 translation_parts.append(self._current_zh)
-        return " ".join(source_parts), " ".join(translation_parts)
+        return (
+            self._display_text(" ".join(source_parts)),
+            self._display_text(" ".join(translation_parts)),
+        )
 
     def _build_compact_render_items(self) -> list[tuple[str, str]]:
         source_parts: list[str] = []
@@ -970,9 +1176,9 @@ class SubtitleWindow:
                 translation_parts.append(self._current_zh)
         items: list[tuple[str, str]] = []
         if source_parts:
-            items.append((" ".join(source_parts), "ja"))
+            items.append((self._display_text(" ".join(source_parts)), "ja"))
         if translation_parts:
-            items.append((" ".join(translation_parts), "zh"))
+            items.append((self._display_text(" ".join(translation_parts)), "zh"))
         return items
 
     def _build_render_items(self) -> list[tuple[str, str]]:
@@ -983,38 +1189,50 @@ class SubtitleWindow:
         items: list[tuple[str, str]] = []
         for block in self._history:
             if self._show_source_text and block.get("ja"):
-                items.append((block["ja"], "ja"))
+                items.append((self._display_text(block["ja"]), "ja"))
             if self._show_translation_text and block.get("zh"):
-                items.append((block["zh"], "zh"))
+                items.append((self._display_text(block["zh"]), "zh"))
 
         if not self._show_pending:
             return items
 
         for block in self._pending_pair_blocks():
             if self._show_source_text and block.get("ja") and not self._is_recent_text(block["ja"], "ja"):
-                items.append((block["ja"], "pending"))
+                items.append((self._display_text(block["ja"]), "pending"))
             if self._show_translation_text and block.get("zh") and not self._is_recent_text(block["zh"], "zh"):
-                items.append((block["zh"], "pending"))
+                items.append((self._display_text(block["zh"]), "pending"))
 
         if self._carry_ja or self._carry_zh:
             carry_block = {"ja": self._carry_ja, "zh": self._carry_zh}
             if self._block_len(carry_block) >= self.config.min_pending_display_chars:
                 if self._show_source_text and self._carry_ja and not self._is_recent_text(self._carry_ja, "ja"):
-                    items.append((self._carry_ja, "pending"))
+                    items.append((self._display_text(self._carry_ja), "pending"))
                 if self._show_translation_text and self._carry_zh and not self._is_recent_text(self._carry_zh, "zh"):
-                    items.append((self._carry_zh, "pending"))
+                    items.append((self._display_text(self._carry_zh), "pending"))
 
         if pending_ja or self._current_zh:
             if self._show_source_text and pending_ja and not self._is_recent_text(pending_ja, "ja"):
-                items.append((pending_ja, "pending"))
+                items.append((self._display_text(pending_ja), "pending"))
             if self._show_translation_text and self._current_zh and not self._is_recent_text(self._current_zh, "zh"):
-                items.append((self._current_zh, "pending"))
+                items.append((self._display_text(self._current_zh), "pending"))
             self._log_subtitle("render_pending", ja=pending_ja, zh=self._current_zh)
         return items
 
     @staticmethod
     def _normalize(text: str | None) -> str:
         return " ".join((text or "").split())
+
+    @staticmethod
+    def _display_text(text: str | None) -> str:
+        """Replace sentence full stops only at the final display boundary."""
+        normalized = SubtitleWindow._normalize(text)
+        if not normalized:
+            return ""
+        # Keep decimal points such as 3.14 intact, while replacing ordinary
+        # ASCII sentence periods and CJK full stops with visual spaces.
+        normalized = re.sub(r"(?<!\d)\.(?!\d)", " ", normalized)
+        normalized = normalized.translate(str.maketrans({"。": " ", "｡": " ", "．": " "}))
+        return SubtitleWindow._normalize(normalized)
 
     @property
     def _show_pending(self) -> bool:
@@ -1206,7 +1424,8 @@ class SubtitleWindow:
     def _pending_pair_blocks(self) -> list[dict[str, str]]:
         now = time.monotonic()
         blocks: list[dict[str, str]] = []
-        for _, start_at, end_at, zh_text in self._pending_zh_segments:
+        for item in self._pending_zh_segments:
+            _, start_at, end_at, zh_text, _ = self._pending_zh_values(item)
             blocks.append(
                 {
                     "ja": self._ja_text_for_range(start_at, end_at, now),
@@ -1227,11 +1446,20 @@ class SubtitleWindow:
         ]
         continuation = getattr(self, "_source_continuation", None)
         if continuation is not None:
-            previous_end, _ = continuation
+            previous_end, continuation_text = continuation
             ttl = max(1.0, self.config.stable_hard_max_wait_ms / 1000)
             if 0 <= end_at - previous_end <= ttl:
-                fragments = [(ts, text) for ts, text in self._ja_fragments
-                             if previous_end - ttl <= ts <= end]
+                # The previous incomplete translation already consumed this
+                # source context logically.  Re-selecting the old fragments
+                # here duplicates prefixes such as "何では岩じゃな" when
+                # the continuation arrives. Keep that context once, then add
+                # only source fragments that arrived afterwards.
+                continuation_fragments = [
+                    (ts, text)
+                    for ts, text in self._ja_fragments
+                    if previous_end < ts <= end
+                ]
+                fragments = [(previous_end, continuation_text)] + continuation_fragments
             else:
                 self._source_continuation = None
         if not fragments:
@@ -1273,7 +1501,8 @@ class SubtitleWindow:
         if self._current_zh and self._current_zh_started_at is not None:
             protected_starts.append(self._current_zh_started_at)
         protected_starts.extend(
-            start_at for _, start_at, _, _ in self._pending_zh_segments
+            self._pending_zh_values(item)[1]
+            for item in self._pending_zh_segments
         )
         if protected_starts:
             cutoff = min(

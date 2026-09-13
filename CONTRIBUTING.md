@@ -13,13 +13,8 @@ Never commit API keys, captured audio, transcripts, logs, or local configuration
 Run these checks before opening a pull request:
 
 ```powershell
-python -m compileall -q app.py chrome_server.py scripts src
+python -m compileall -q app.py scripts src
 python -m unittest discover -v
-node --test tests/extension.test.cjs
-python -m json.tool chrome-extension/manifest.json
-node --check chrome-extension/content.js
-node --check chrome-extension/offscreen.js
-node --check chrome-extension/service-worker.js
 ```
 
-Describe whether a change affects the desktop overlay, Chrome extension, local bridge, audio capture, or API usage.
+Describe whether a change affects the desktop overlay, audio capture, or API usage.

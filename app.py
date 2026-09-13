@@ -274,12 +274,19 @@ async def run_translation(
                 output_text = event.output_text
                 if log_transcriptions:
                     logger.debug("Output transcription: %s", event.output_text)
-            if input_text or output_text:
-                window.set_bilingual(input_text=input_text, output_text=output_text)
+            if input_text or output_text or event.turn_complete:
+                window.set_bilingual(
+                    input_text=input_text,
+                    output_text=output_text,
+                    turn_complete=event.turn_complete,
+                )
 
     async def connect_until_ready() -> bool:
         while not stop_event.is_set():
             try:
+                reset_pairing = getattr(window, "reset_pairing", None)
+                if callable(reset_pairing):
+                    reset_pairing()
                 window.set_text("Connecting to Gemini...")
                 await translator.start()
                 window.set_text("Connected. Waiting for audio...")
@@ -441,6 +448,7 @@ def main() -> None:
             stable_max_wait_ms=int(subtitle_cfg.get("stable_max_wait_ms", 6500)),
             stable_hard_max_wait_ms=int(subtitle_cfg.get("stable_hard_max_wait_ms", 12000)),
             stable_pause_ms=int(subtitle_cfg.get("stable_pause_ms", 1800)),
+            timeout_commit_grace_ms=int(subtitle_cfg.get("timeout_commit_grace_ms", 700)),
             log_latency_metrics=bool(app_cfg.get("log_latency_metrics", False)),
             log_rendered_subtitles=bool(subtitle_cfg.get("log_rendered_subtitles", False)),
             duplicate_recent_window=int(subtitle_cfg.get("duplicate_recent_window", 6)),
@@ -449,6 +457,12 @@ def main() -> None:
             ja_pair_max_chars=int(subtitle_cfg.get("ja_pair_max_chars", 320)),
             ja_pair_preroll_seconds=float(subtitle_cfg.get("ja_pair_preroll_seconds", 0.5)),
             ja_pair_postroll_seconds=float(subtitle_cfg.get("ja_pair_postroll_seconds", 0.25)),
+            max_source_to_translation_ratio=float(
+                subtitle_cfg.get("max_source_to_translation_ratio", 3.0)
+            ),
+            max_source_overhang_chars=int(
+                subtitle_cfg.get("max_source_overhang_chars", 12)
+            ),
             pair_commit_delay_ms=int(subtitle_cfg.get("pair_commit_delay_ms", 600)),
             require_bilingual_for_display=bool(subtitle_cfg.get("require_bilingual_for_display", True)),
             max_wait_for_ja_ms=int(subtitle_cfg.get("max_wait_for_ja_ms", 1800)),

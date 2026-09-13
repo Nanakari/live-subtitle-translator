@@ -25,25 +25,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
       - name: Install pinned dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Check installed dependencies
         run: python -m pip check
       - name: Compile Python sources
-        run: python -m compileall -q app.py chrome_server.py scripts src tests
+        run: python -m compileall -q app.py scripts src tests
       - name: Run unit tests
         run: python -m unittest discover -v
-      - name: Test extension behavior
-        run: node --test tests/extension.test.cjs
-      - name: Validate extension manifest
-        run: python -m json.tool chrome-extension/manifest.json > /dev/null
-      - name: Check extension JavaScript
-        run: |
-          node --check chrome-extension/content.js
-          node --check chrome-extension/offscreen.js
-          node --check chrome-extension/pcm-processor.js
-          node --check chrome-extension/popup.js
-          node --check chrome-extension/service-worker.js

@@ -4,8 +4,7 @@
 
 A Windows desktop live-subtitle translator. It captures system playback audio,
 translates it through Gemini Live, and shows an always-on-top bilingual subtitle
-window. A Chrome extension is also included for translating the audio of the
-current browser tab.
+window.
 
 ## Requirements
 
@@ -73,46 +72,38 @@ Key settings:
   `GEMINI_API_KEY`.
 - `network.proxy_url`: optional proxy URL. Keep it empty for a direct
   connection.
-- `bridge.allowed_extension_ids`: optional allowlist for unpacked Chrome
-  extension IDs. Setting it prevents other browser extensions and ordinary
-  webpages from opening translation sessions through the local bridge.
 - `subtitle.layout_style`: `compact` (default) or `classic`.
 - `subtitle.always_on_top`: keeps the subtitle window above other windows.
-
-## Chrome extension
-
-1. Start the local bridge by double-clicking `start_chrome_bridge_hidden.vbs`.
-2. Open `chrome://extensions`, enable Developer mode, and choose **Load
-   unpacked**.
-3. Select the `chrome-extension` directory.
-4. Open a page to translate, click the extension icon, and start translation.
-
-The extension captures the current tab's audio. Its overlay is limited to the
-captured tab by default. Choose **所有网页标签页** in the popup to explicitly
-show it across web tabs; this puts subtitle text into those pages. Use the desktop
-app when subtitles must stay visible across other applications. Closing the
-captured tab stops its audio stream, bridge connection, and subtitle overlays.
 
 ## Subtitle responsiveness and diagnostics
 
 - Sentence mode favors complete sentences. `subtitle.pair_commit_delay_ms`
-  defaults to 600 ms for source/translation pairing.
-- `subtitle.max_short_carry_ms` defaults to 1800 ms, measured from the first
+  defaults to 300 ms for source/translation pairing.
+- `subtitle.max_short_carry_ms` defaults to 1000 ms, measured from the first
   buffered short phrase; further fragments do not restart the deadline.
-- `subtitle.stable_max_wait_ms` is a 6500 ms soft deadline: after it, a long
+- `subtitle.stable_max_wait_ms` is a 4000 ms soft deadline: after it, a long
   unfinished translation may be released at a comma/clause boundary. A fragment
   without a suitable boundary continues waiting for its continuation.
-- A pause of `subtitle.stable_pause_ms` (1800 ms) can release stable text early,
+- A pause of `subtitle.stable_pause_ms` (1000 ms) can release stable text early,
   unless a simple suffix heuristic considers it unfinished. These rules use
   punctuation and timing, not a separate semantic model.
-- `subtitle.stable_hard_max_wait_ms` (12000 ms) bounds waiting when a sentence
-  never finishes. `subtitle.max_pending_chars` (180) also bounds buffered text.
+- Timeout-split fragments use an additional `subtitle.timeout_commit_grace_ms`
+  (700 ms by default) before display so a near-term continuation can merge with
+  them. Complete sentences keep the normal pair delay, and `turn_complete`
+  bypasses the grace window.
+- `subtitle.stable_hard_max_wait_ms` (8000 ms) bounds waiting when a sentence
+  never finishes. `subtitle.max_pending_chars` (140) also bounds buffered text.
   Complete sentences can display sooner; this is not a fixed 12-second delay.
 - Timeout prefixes and already-arrived continuations are paired together. If
   source/translation clause boundaries are uncertain, unfinished translations
   temporarily share source context (bounded by the hard deadline) rather than
   consuming the source before the continuation arrives. This is approximate
   alignment, not word-level alignment supplied by Gemini.
+- A source block whose length is implausibly large for the current translation
+  is treated as stale context and hidden for that block; the translation is
+  still shown. Source pairing is reset at each `turn_complete` boundary and
+  when a Gemini session reconnects, so the next turn cannot inherit the
+  previous turn's source buffer.
 - Standalone hesitation fragments wait for continuation and expire at the hard
   deadline. Meaningful text retains a bounded display deadline; a dangling tail
   after a comma is kept for the next fragment when possible.
@@ -132,16 +123,14 @@ captured tab stops its audio stream, bridge connection, and subtitle overlays.
   model response to a specific audio chunk or measure physical screen refresh.
   Detailed timing is disabled by default because audio-stage logs are frequent.
 
-Configuration changes apply after restarting the desktop app or bridge.
-Reload the unpacked extension to apply JavaScript changes. Existing values in
+Configuration changes apply after restarting the desktop app. Existing values in
 `config.local.yaml` take precedence over the shared defaults.
 
 ## Development checks
 
 ```powershell
-.\.venv\Scripts\python.exe -m compileall -q app.py chrome_server.py scripts src
+.\.venv\Scripts\python.exe -m compileall -q app.py scripts src
 .\.venv\Scripts\python.exe -m unittest discover -v
-node --test tests/extension.test.cjs
 ```
 
 ## Security
