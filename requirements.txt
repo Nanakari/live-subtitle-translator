@@ -1,4 +1,4 @@
-google-genai==1.47.0
+google-genai==2.23.0
 numpy==2.0.2
 soundcard==0.4.6
 soundfile==0.13.1
