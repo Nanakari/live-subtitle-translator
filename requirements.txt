@@ -2,7 +2,7 @@ google-genai==1.47.0
 numpy==2.0.2
 soundcard==0.4.6
 soundfile==0.13.1
-scipy==1.13.1
+scipy==1.18.1
 PyYAML==6.0.3
 pystray==0.19.5
 Pillow==12.3.0
