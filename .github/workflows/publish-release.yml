@@ -1,0 +1,52 @@
+name: Publish verified portable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Windows portable build run ID
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate successful build and resolve its commit
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$BUILD_RUN_ID" =~ ^[0-9]+$ ]]
+          metadata=$(gh run view "$BUILD_RUN_ID" --json headSha,conclusion,workflowName)
+          test "$(jq -r .conclusion <<< "$metadata")" = success
+          test "$(jq -r .workflowName <<< "$metadata")" = "Windows portable build"
+          echo "sha=$(jq -r .headSha <<< "$metadata")" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-portable
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+          path: release-assets
+      - name: Verify checksum and publish v0.1.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_SHA: ${{ steps.build.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum -c SHA256SUMS.txt
+          test -f LiveSubtitleTranslator-v0.1.0-windows-x64.zip
+          gh release create v0.1.0 LiveSubtitleTranslator-v0.1.0-windows-x64.zip SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$BUILD_SHA" \
+            --title "v0.1.0 - Windows portable release" \
+            --notes-file ../RELEASE_NOTES_v0.1.0.md --latest
