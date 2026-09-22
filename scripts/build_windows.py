@@ -48,7 +48,7 @@ def main() -> None:
         data = json.loads(report.read_text(encoding="utf-8"))
         if result.returncode or not data.get("ok") or not data.get("frozen"):
             raise RuntimeError(f"Frozen smoke test failed: {data}")
-        if Path(data["config_root"]) != package:
+        if not Path(data["config_root"]).samefile(package):
             raise RuntimeError("Frozen app loaded configuration from the wrong directory")
         basename = f"LiveSubtitleTranslator-{args.version}-windows-x64"
         archive = Path(shutil.make_archive(str(dist / basename), "zip", package.parent, name))
