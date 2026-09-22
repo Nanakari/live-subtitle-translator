@@ -163,8 +163,15 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 FakeWindow(), stop_event, controls,
             ))
             try:
-                for _ in range(100):
+                # Windows runners can schedule the capture thread much later
+                # than the event loop; wait for the observed audio, not ticks.
+                deadline = asyncio.get_running_loop().time() + 5
+                audio = []
+                while asyncio.get_running_loop().time() < deadline:
                     await asyncio.sleep(0.01)
+                    if task.done():
+                        await task
+                        break
                     if RecordingTranslator.instances:
                         audio = RecordingTranslator.instances[-1].audio
                         if any(float(chunk[0]) > 0.35 for chunk in audio):
