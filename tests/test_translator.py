@@ -8,6 +8,7 @@ from unittest.mock import patch, AsyncMock, Mock
 
 from src.gemini_live_translate import (
     GeminiLiveTranslator,
+    TranslationEvent,
     WebSocketControlDiagnostics,
     WebSocketControlLogHandler,
 )
@@ -200,6 +201,8 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
         events = translator.receive_translations()
         event = await events.__anext__()
+        self.assertTrue(event.session_started)
+        event = await events.__anext__()
         await events.aclose()
         await translator.close()
 
@@ -278,6 +281,7 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
         translator._session_started_at = 100.0
         translator._last_server_message_at = 149.5
         translator._last_audio_sent_at = 149.8
+        translator._observe_transcription(TranslationEvent(input_text="hello", input_language_code="en"), 100.0)
 
         self.assertTrue(translator._subtitle_data_is_stalled(150.0))
 
@@ -292,6 +296,7 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
         translator._last_audio_sent_at = 149.8
         translator._last_input_transcription_at = 149.5
         translator._translation_wait_started_at = 100.0
+        translator._translation_expected = True
 
         self.assertTrue(translator._translation_output_is_stalled(150.0))
 

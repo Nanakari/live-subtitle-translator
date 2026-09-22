@@ -9,3 +9,7 @@ desktop_state.json
 desktop_state.json.tmp
 .env
 *.wav
+build/
+dist/
+*.spec
+*.lnk

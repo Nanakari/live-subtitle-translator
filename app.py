@@ -4,12 +4,14 @@ import asyncio
 import logging
 import os
 import queue
+import sys
 import threading
 from collections import deque
 from pathlib import Path
 
 from src.audio_capture import SystemAudioCapture, SystemAudioCaptureError
 from src.config import load_project_config
+from src.connection_errors import is_retryable_connection_error
 from src.desktop_runtime import (
     DesktopControlState,
     GlobalPauseHotkey,
@@ -23,7 +25,7 @@ from src.silence_detector import SilenceDetector
 from src.subtitle_window import SubtitleWindow, SubtitleWindowConfig
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 
 
 def load_config() -> dict:
@@ -52,18 +54,6 @@ def is_expected_reconnect_message(message: str | None) -> bool:
         "connection aborted because the client failed to close",
     )
     return any(marker in text for marker in expected_markers)
-
-
-def is_retryable_connection_error(exc: Exception) -> bool:
-    """Return whether an initial connection failure may recover without user action."""
-    text = str(exc).lower()
-    return (
-        isinstance(exc, (TimeoutError, OSError, ConnectionError))
-        or "opening handshake" in text
-        or "timed out" in text
-        or "connection" in text
-        or "temporarily unavailable" in text
-    )
 
 
 def enqueue_latest(item_queue: queue.Queue, item: object) -> None:
@@ -97,7 +87,6 @@ async def run_translation(
     )
     audio_cfg = config.get("audio", {})
     gemini_cfg = config.get("gemini", {})
-    subtitle_cfg = config.get("subtitle", {})
     reconnect = bool(gemini_cfg.get("reconnect", True))
     reconnect_delay = float(gemini_cfg.get("reconnect_delay_seconds", 2))
     chunk_seconds = max(0.001, float(audio_cfg.get("chunk_ms", 100)) / 1000)
@@ -117,6 +106,9 @@ async def run_translation(
         sample_rate=int(audio_cfg.get("sample_rate", 16000)),
         reconnect=reconnect,
         reconnect_delay_seconds=reconnect_delay,
+        connect_timeout_seconds=float(gemini_cfg.get("connect_timeout_seconds", 15)),
+        send_timeout_seconds=float(gemini_cfg.get("send_timeout_seconds", 5)),
+        cleanup_timeout_seconds=float(gemini_cfg.get("cleanup_timeout_seconds", 2)),
         session_resumption=bool(gemini_cfg.get("session_resumption", True)),
         context_window_compression=bool(
             gemini_cfg.get("context_window_compression", True)
@@ -152,7 +144,6 @@ async def run_translation(
         ),
     )
     audio_queue: queue.Queue = queue.Queue(maxsize=20)
-    session_transition_lock = asyncio.Lock()
 
     def put_audio_item(item: object) -> None:
         enqueue_latest(audio_queue, item)
@@ -178,7 +169,7 @@ async def run_translation(
             controls.device_change_event.clear()
             capture = SystemAudioCapture(
                 sample_rate=int(audio_cfg.get("sample_rate", 16000)),
-                channels=int(audio_cfg.get("channels", 1)),
+                channels=audio_cfg.get("channels"),
                 chunk_ms=int(audio_cfg.get("chunk_ms", 100)),
                 speaker_name=controls.audio_device(),
             )
@@ -230,15 +221,20 @@ async def run_translation(
     async def send_audio_loop() -> None:
         while not stop_event.is_set():
             try:
-                chunk = await asyncio.to_thread(audio_queue.get)
+                # Poll without an executor thread: cancelling a blocking
+                # queue.get leaves a reader behind that can consume wake preroll.
+                try:
+                    chunk = audio_queue.get_nowait()
+                except queue.Empty:
+                    await asyncio.sleep(0.01)
+                    continue
                 if chunk is None:
                     break
                 if isinstance(chunk, Exception):
                     raise chunk
-                async with session_transition_lock:
-                    if controls.session_should_sleep():
-                        continue
-                    await translator.send_audio(chunk)
+                if controls.session_should_sleep():
+                    continue
+                await translator.send_audio(chunk)
             except SystemAudioCaptureError as exc:
                 logger.error(str(exc))
                 window.set_text(str(exc))
@@ -248,22 +244,38 @@ async def run_translation(
                 raise
             except Exception as exc:
                 logger.warning("Audio sender paused after error: %s", exc, exc_info=True)
-                window.set_text(f"Audio/Gemini error: {type(exc).__name__}. Retrying...")
-                if not reconnect:
+                if not reconnect or not is_retryable_connection_error(exc):
+                    window.set_text(f"Gemini connection failed: {type(exc).__name__}: {exc}")
                     stop_event.set()
                     break
+                window.set_text(f"Audio/Gemini error: {type(exc).__name__}. Retrying...")
                 await asyncio.sleep(reconnect_delay)
 
+    last_session_id: int | None = None
+
     async def receive_text_loop() -> None:
+        nonlocal last_session_id
         show_input = bool(gemini_cfg.get("show_input_transcription", False))
         log_transcriptions = bool(gemini_cfg.get("log_transcriptions", False))
 
         async for event in translator.receive_translations():
             if stop_event.is_set():
                 break
+            if (event.session_id is not None and last_session_id is not None
+                    and event.session_id < last_session_id):
+                continue
+            if event.session_id is not None and event.session_id != last_session_id:
+                last_session_id = event.session_id
+                reset_pairing = getattr(window, "reset_pairing", None)
+                if callable(reset_pairing):
+                    reset_pairing(session_id=event.session_id)
             if event.error:
                 log_level = logging.INFO if is_expected_reconnect_message(event.error) else logging.WARNING
                 logger.log(log_level, "Gemini event error: %s", event.error)
+                if event.fatal:
+                    window.set_text(f"Gemini connection failed: {event.error}")
+                    stop_event.set()
+                    return
                 window.set_text(f"Gemini reconnecting: {event.error or 'connection error'}")
                 continue
             input_text = event.input_text if show_input else None
@@ -279,14 +291,12 @@ async def run_translation(
                     input_text=input_text,
                     output_text=output_text,
                     turn_complete=event.turn_complete,
+                    session_id=event.session_id,
                 )
 
     async def connect_until_ready() -> bool:
         while not stop_event.is_set():
             try:
-                reset_pairing = getattr(window, "reset_pairing", None)
-                if callable(reset_pairing):
-                    reset_pairing()
                 window.set_text("Connecting to Gemini...")
                 await translator.start()
                 window.set_text("Connected. Waiting for audio...")
@@ -297,64 +307,82 @@ async def run_translation(
                     type(exc).__name__,
                     exc,
                 )
-                window.set_text(f"Gemini connection failed: {type(exc).__name__}. Retrying...")
                 if not reconnect or not is_retryable_connection_error(exc):
                     window.set_text(f"Gemini connection failed: {type(exc).__name__}: {exc}")
                     stop_event.set()
                     return False
+                window.set_text(f"Gemini connection failed: {type(exc).__name__}. Retrying...")
                 await asyncio.sleep(reconnect_delay)
         return False
 
-    tasks: list[asyncio.Task] = []
+    tasks: dict[str, asyncio.Task] = {}
     capture_thread: threading.Thread | None = None
+
+    async def cancel_session_tasks() -> None:
+        cancelled = [tasks.pop(name) for name in ("connect", "send", "receive") if name in tasks]
+        for task in cancelled:
+            task.cancel()
+        if cancelled:
+            await asyncio.gather(*cancelled, return_exceptions=True)
+
     try:
-        if not await connect_until_ready():
-            return
-        capture_thread = threading.Thread(
-            target=audio_capture_worker,
-            name="audio-capture",
-            daemon=True,
-        )
-        capture_thread.start()
-        send_task = asyncio.create_task(send_audio_loop(), name="audio sender")
-        receive_task: asyncio.Task | None = asyncio.create_task(
-            receive_text_loop(),
-            name="Gemini receiver",
-        )
-        tasks = [send_task, receive_task]
         session_sleeping = False
         while not stop_event.is_set():
+            # Keep all network operations in child tasks so neither a pending
+            # setup response nor a slow close blocks pause/stop observation.
+            disconnect_task = tasks.get("disconnect")
+            if disconnect_task is not None:
+                if not disconnect_task.done():
+                    await asyncio.sleep(0.05)
+                    continue
+                disconnect_task.result()
+                del tasks["disconnect"]
+                if controls.pause_event.is_set():
+                    window.set_text("Paused. Gemini session disconnected.")
+                elif controls.auto_sleep_event.is_set():
+                    window.set_text("No audio. Gemini is sleeping.")
+
             should_sleep = controls.session_should_sleep()
             if should_sleep and not session_sleeping:
-                if receive_task is not None:
-                    receive_task.cancel()
-                    await asyncio.gather(receive_task, return_exceptions=True)
-                    receive_task = None
+                # Cancel both users before closing: a sender awaiting network
+                # backpressure must never hold up an intentional disconnect.
+                await cancel_session_tasks()
                 # Capture already discards silence. Do not clear here: audio
                 # may have returned while receiver cancellation was pending.
                 logger.info("Desktop session sleeping | reason=%s", "user_pause" if controls.pause_event.is_set() else "silence")
-                async with session_transition_lock:
-                    await translator.disconnect()
+                tasks["disconnect"] = asyncio.create_task(
+                    translator.disconnect(), name="Gemini disconnect"
+                )
                 session_sleeping = True
                 if controls.pause_event.is_set():
-                    window.set_text("Paused. Gemini session disconnected.")
+                    window.set_text("Paused. Disconnecting from Gemini...")
                 else:
-                    window.set_text("No audio. Gemini is sleeping.")
-            elif not should_sleep and session_sleeping:
-                window.set_text("Audio detected. Reconnecting to Gemini...")
-                if not await connect_until_ready():
-                    return
-                receive_task = asyncio.create_task(
-                    receive_text_loop(),
-                    name="Gemini receiver",
-                )
-                tasks.append(receive_task)
+                    window.set_text("No audio. Disconnecting from Gemini...")
+            elif not should_sleep:
                 session_sleeping = False
+                if "connect" not in tasks and "send" not in tasks:
+                    tasks["connect"] = asyncio.create_task(
+                        connect_until_ready(), name="Gemini connect"
+                    )
+                connect_task = tasks.get("connect")
+                if connect_task is not None and connect_task.done():
+                    if not connect_task.result():
+                        break
+                    del tasks["connect"]
+                    if capture_thread is None:
+                        capture_thread = threading.Thread(
+                            target=audio_capture_worker, name="audio-capture", daemon=True
+                        )
+                        capture_thread.start()
+                    tasks["send"] = asyncio.create_task(send_audio_loop(), name="audio sender")
+                    tasks["receive"] = asyncio.create_task(
+                        receive_text_loop(), name="Gemini receiver"
+                    )
 
-            monitored_tasks = [send_task]
-            if receive_task is not None:
-                monitored_tasks.append(receive_task)
-            for task in monitored_tasks:
+            for name in ("send", "receive"):
+                task = tasks.get(name)
+                if task is None:
+                    continue
                 if not task.done() or task.cancelled():
                     continue
                 error = task.exception()
@@ -363,14 +391,14 @@ async def run_translation(
                 window.set_text(f"Translator stopped: {task.get_name()} ended unexpectedly.")
                 stop_event.set()
                 break
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05)
     finally:
         stop_event.set()
         put_audio_item(None)
-        for task in tasks:
+        for task in tasks.values():
             task.cancel()
         if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
         if capture_thread is not None:
             capture_thread.join(timeout=2)
         try:

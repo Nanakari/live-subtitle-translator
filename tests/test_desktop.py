@@ -268,7 +268,12 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
             translator = RecordingTranslator.instances[-1]
             self.assertEqual(translator.audio, [])
             controls.toggle_paused()
-            await asyncio.sleep(0.12)
+            # Connection completion is observed by the supervisor on its next
+            # tick. Wait for the behavior rather than a scheduler-dependent delay.
+            for _ in range(100):
+                if translator.audio:
+                    break
+                await asyncio.sleep(0.01)
             stop_event.set()
             await asyncio.wait_for(task, timeout=1)
 

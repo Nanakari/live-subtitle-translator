@@ -14,6 +14,14 @@ window.
 
 ## Quick start: desktop app
 
+For Windows x64, download the portable ZIP from
+[Releases](https://github.com/Nanakari/live-subtitle-translator/releases/latest).
+Extract the whole folder and follow `PORTABLE-README.txt`. The portable build
+includes Python; configure your own Gemini API key before starting the executable.
+The executable is unsigned.
+
+To run from source:
+
 ```powershell
 git clone https://github.com/Nanakari/live-subtitle-translator.git
 cd live-subtitle-translator
@@ -74,6 +82,37 @@ Key settings:
   connection.
 - `subtitle.layout_style`: `compact` (default) or `classic`.
 - `subtitle.always_on_top`: keeps the subtitle window above other windows.
+- `audio.channels`: `null` selects the playback device's native channel count.
+  Audio is captured with at least two channels and downmixed to mono before
+  sending to Gemini, avoiding SoundCard's Windows single-channel recording issue.
+  Existing local `channels: 1` settings also select native multichannel capture.
+  A mono-only playback device produces an actionable error; select a stereo
+  device instead. An explicit value of 2 or more selects that many channels,
+  provided the playback device supports them.
+- `gemini.connect_timeout_seconds`: maximum wait for the WebSocket connection
+  and Gemini setup response (15 seconds by default).
+- `gemini.send_timeout_seconds`: maximum wait for an audio send (5 seconds by
+  default); a timeout drops the connection so automatic reconnection can recover.
+- `gemini.cleanup_timeout_seconds`: timeout for each asynchronous socket/client
+  cleanup operation (2 seconds by default). These timeouts must be finite and
+  positive. Cancellation cleanup may take additional time after an I/O timeout.
+
+Pause and exit cancel in-flight connection/send tasks before closing the session.
+Resume waits for the previous disconnect to finish before starting a new session.
+
+Connection recovery distinguishes permanent request/authentication errors from
+network failures. HTTP 400/401/403/404 stop translation and show the error; HTTP
+408/429 and server errors remain retryable. This policy also applies after an
+established connection fails. An explicitly rejected session-resumption handle
+is discarded and tried once as a fresh session. Network outages retain a valid
+handle; authentication failures do not trigger a fresh-session fallback.
+
+Subtitle and translation-output watchdogs require evidence that a translation
+is expected. With `echo_target_language: false`, target-language input and input
+without language metadata do not arm these timers. The pinned SDK can omit that
+metadata, so output-only stall detection is intentionally conservative; connection,
+send, and server-data timeouts remain active. Enabling echo or receiving a confirmed
+non-target-language code allows the content watchdogs to detect stalled output.
 
 ## Subtitle responsiveness and diagnostics
 
@@ -101,9 +140,12 @@ Key settings:
   alignment, not word-level alignment supplied by Gemini.
 - A source block whose length is implausibly large for the current translation
   is treated as stale context and hidden for that block; the translation is
-  still shown. Source pairing is reset at each `turn_complete` boundary and
-  when a Gemini session reconnects, so the next turn cannot inherit the
-  previous turn's source buffer.
+  still shown. Source pairing is reset at each `turn_complete` boundary.
+  A fresh Gemini session clears pending source/translation fragments, short-phrase
+  carry, displayed history and dedup state. Successful resumption of the same
+  session preserves that state. Session IDs on subtitle packets ensure stale
+  packets cannot contaminate a new session, even if the UI queue drops a boundary
+  notification under load.
 - Standalone hesitation fragments wait for continuation and expire at the hard
   deadline. Meaningful text retains a bounded display deadline; a dangling tail
   after a comma is kept for the next fragment when possible.
@@ -126,7 +168,30 @@ Key settings:
 Configuration changes apply after restarting the desktop app. Existing values in
 `config.local.yaml` take precedence over the shared defaults.
 
+Original only commits source text independently of translation: punctuation,
+turn completion, or the configured stable deadline can publish it even when
+Gemini suppresses target-language output. Switching into or out of Original only
+clears unfinished pairing state while retaining displayed history.
+
+Translation packets are appended as text deltas, preserving word-boundary
+whitespace and repeated letters. Committed utterances are not discarded just
+because they repeat or contain an earlier sentence; the stream does not provide
+a segment ID that would reliably distinguish a replay from real repetition.
+
+Both `gemini.log_transcriptions` and `subtitle.log_rendered_subtitles` default to
+false. They independently enable transcript and subtitle/pairing text in logs;
+local overrides can still enable either. Log formatting redacts registered API
+keys and recognized key formats from messages, exception chains and stack text.
+Failure to save window settings during exit is logged and does not prevent
+stopping the translator or destroying the window.
+
 ## Development checks
+
+Build a Windows x64 portable package on Windows with
+`python -m pip install -r requirements-build.txt`, then
+`python scripts/build_windows.py --version v0.1.0`. The builder runs an offline
+smoke test of the frozen executable and writes the ZIP and SHA-256 checksum to
+`dist/`. It copies only the public configuration and documentation into the package.
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall -q app.py scripts src

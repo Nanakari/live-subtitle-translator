@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import time
 import warnings
@@ -10,6 +11,9 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import numpy as np
+
+from src.connection_errors import is_resumption_rejected, is_retryable_connection_error
+from src.logger import register_secret
 
 
 MISSING_API_KEY_MESSAGE = (
@@ -26,6 +30,11 @@ class TranslationEvent:
     # Keeping it alongside the transcription lets the UI commit a stable
     # sentence without waiting for a heuristic timeout.
     turn_complete: bool = False
+    fatal: bool = False
+    # Logical session identity is preserved across successful session resumption.
+    session_id: int | None = None
+    session_started: bool = False
+    input_language_code: str | None = None
 
 
 @dataclass
@@ -138,7 +147,17 @@ class GeminiLiveTranslator:
         translation_output_timeout_seconds: float = 45.0,
         log_latency_metrics: bool = False,
         logger: Any | None = None,
+        connect_timeout_seconds: float = 15.0,
+        send_timeout_seconds: float = 5.0,
+        cleanup_timeout_seconds: float = 2.0,
     ) -> None:
+        for name, value in (
+            ("connect_timeout_seconds", connect_timeout_seconds),
+            ("send_timeout_seconds", send_timeout_seconds),
+            ("cleanup_timeout_seconds", cleanup_timeout_seconds),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite positive number")
         self.model = model
         self.target_language_code = target_language_code
         self.echo_target_language = echo_target_language
@@ -158,6 +177,9 @@ class GeminiLiveTranslator:
         self.translation_output_timeout_seconds = translation_output_timeout_seconds
         self.log_latency_metrics = log_latency_metrics
         self.logger = logger
+        self.connect_timeout_seconds = connect_timeout_seconds
+        self.send_timeout_seconds = send_timeout_seconds
+        self.cleanup_timeout_seconds = cleanup_timeout_seconds
         self._client = None
         self._session_cm = None
         self._session = None
@@ -174,68 +196,98 @@ class GeminiLiveTranslator:
         self._translation_wait_started_at: float | None = None
         self._last_audio_sent_at: float | None = None
         self._connect_lock = asyncio.Lock()
+        self._terminal_error: Exception | None = None
+        self._session_generation = 0
+        self._translation_expected = False
 
     async def start(self) -> None:
         api_key = self.api_key or os.getenv(self.api_key_env)
         if not api_key:
             raise RuntimeError(MISSING_API_KEY_MESSAGE.format(env_name=self.api_key_env))
+        register_secret(api_key)
 
         async with self._connect_lock:
+            if self._terminal_error is not None:
+                raise self._terminal_error
             if self._session is not None:
                 return
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=FutureWarning)
-                warnings.filterwarnings(
-                    "ignore",
-                    message="Pydantic serializer warnings:*",
-                    category=UserWarning,
-                )
-                from google import genai
-
-                self._connection_sequence += 1
-                diagnostics = self._new_websocket_diagnostics()
-                self._client = genai.Client(
-                    api_key=api_key,
-                    http_options=self._build_http_options(diagnostics),
-                )
+            # Retry once without an explicitly rejected handle. Authentication,
+            # model/configuration errors and network outages do not trigger this.
+            for attempt in range(2):
+                resume_handle = self._resumption_handle if self.session_resumption else None
                 try:
-                    self._session_cm = self._client.aio.live.connect(
-                        model=self.model,
-                        config=self._build_config(),
-                    )
-                    self._session = await self._session_cm.__aenter__()
-                except BaseException:
-                    self._session = None
-                    self._session_cm = None
-                    await self._close_client()
-                    if diagnostics is not None:
-                        logging.getLogger(
-                            f"gemini.websocket.control.{diagnostics.connection_id}"
-                        ).handlers.clear()
+                    await self._open_session(api_key, resume_handle)
+                    return
+                except Exception as exc:
+                    if attempt == 0 and resume_handle and is_resumption_rejected(exc):
+                        self._resumption_handle = None
+                        self._log("info", "Session resumption was rejected; starting a fresh session")
+                        continue
+                    if not is_retryable_connection_error(exc):
+                        self._terminal_error = exc
                     raise
-            self._websocket_diagnostics = diagnostics
-            self._session_started_at = time.monotonic()
-            self._last_server_message_at = None
-            self._last_subtitle_message_at = None
-            self._last_input_transcription_at = None
-            self._last_output_translation_at = None
-            self._translation_wait_started_at = None
-            self._last_audio_sent_at = None
-            if diagnostics is not None:
-                diagnostics.log_opened(
-                    self.websocket_ping_interval_seconds,
-                    self.websocket_ping_timeout_seconds,
+
+    async def _open_session(self, api_key: str, resume_handle: str | None) -> None:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            warnings.filterwarnings(
+                "ignore",
+                message="Pydantic serializer warnings:*",
+                category=UserWarning,
+            )
+            from google import genai
+
+            self._connection_sequence += 1
+            diagnostics = self._new_websocket_diagnostics()
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options=self._build_http_options(diagnostics),
+            )
+            try:
+                self._session_cm = self._client.aio.live.connect(
+                    model=self.model,
+                    config=self._build_config(),
                 )
-            self._closed = False
-            if (
-                self.server_data_timeout_seconds > 0
-                or self.subtitle_data_timeout_seconds > 0
-                or self.translation_output_timeout_seconds > 0
-            ):
-                self._server_data_watchdog_task = asyncio.create_task(
-                    self._server_data_watchdog(self._session)
+                # Covers the SDK setup response as well as the WebSocket
+                # handshake. The transport's open_timeout covers only the latter.
+                self._session = await asyncio.wait_for(
+                    self._session_cm.__aenter__(), timeout=self.connect_timeout_seconds
                 )
-            self._log("info", "Connected to Gemini Live Translate model=%s", self.model)
+            except BaseException:
+                self._session = None
+                self._session_cm = None
+                await self._close_client()
+                if diagnostics is not None:
+                    logging.getLogger(
+                        f"gemini.websocket.control.{diagnostics.connection_id}"
+                    ).handlers.clear()
+                raise
+        if not resume_handle or self._session_generation == 0:
+            self._session_generation += 1
+        self._translation_expected = False
+        self._websocket_diagnostics = diagnostics
+        self._session_started_at = time.monotonic()
+        self._last_server_message_at = None
+        self._last_subtitle_message_at = None
+        self._last_input_transcription_at = None
+        self._last_output_translation_at = None
+        self._translation_wait_started_at = None
+        self._last_audio_sent_at = None
+        if diagnostics is not None:
+            diagnostics.log_opened(
+                self.websocket_ping_interval_seconds,
+                self.websocket_ping_timeout_seconds,
+            )
+        self._closed = False
+        if (
+            self.server_data_timeout_seconds > 0
+            or self.subtitle_data_timeout_seconds > 0
+            or self.translation_output_timeout_seconds > 0
+        ):
+            self._server_data_watchdog_task = asyncio.create_task(
+                self._server_data_watchdog(self._session)
+            )
+        self._log("info", "Connected to Gemini Live Translate model=%s", self.model)
 
     async def send_audio(self, audio_chunk: np.ndarray | bytes) -> None:
         if self._closed:
@@ -250,14 +302,22 @@ class GeminiLiveTranslator:
 
         pcm = self.audio_to_pcm16_bytes(audio_chunk)
         try:
-            await session.send_realtime_input(
-                audio=types.Blob(data=pcm, mime_type=f"audio/pcm;rate={self.sample_rate}")
+            await asyncio.wait_for(
+                session.send_realtime_input(
+                    audio=types.Blob(data=pcm, mime_type=f"audio/pcm;rate={self.sample_rate}")
+                ),
+                timeout=self.send_timeout_seconds,
             )
             if self._session is session:
                 self._last_audio_sent_at = time.monotonic()
                 if self.log_latency_metrics:
                     self._log("info", "latency stage=audio_sent monotonic_s=%.6f", self._last_audio_sent_at)
         except Exception as exc:
+            if self._session is not session:
+                return
+            fatal = not is_retryable_connection_error(exc)
+            if fatal:
+                self._terminal_error = exc
             level = "info" if self._is_expected_reconnect_error(exc) else "warning"
             self._log(
                 level,
@@ -266,17 +326,21 @@ class GeminiLiveTranslator:
                 exc_info=(level == "warning"),
             )
             await self._drop_session(expected_session=session, reason="audio_send_error")
+            if fatal:
+                raise
             if not self.reconnect:
                 raise
 
     async def receive_translations(self) -> AsyncIterator[TranslationEvent]:
+        announced_session_id: int | None = None
         while not self._closed:
             if self._session is None:
                 try:
                     await self.start()
                 except Exception as exc:
-                    yield TranslationEvent(error=str(exc))
-                    if not self.reconnect:
+                    fatal = not is_retryable_connection_error(exc)
+                    yield TranslationEvent(error=str(exc) or type(exc).__name__, fatal=fatal)
+                    if fatal or not self.reconnect:
                         return
                     await asyncio.sleep(self.reconnect_delay_seconds)
                     continue
@@ -285,8 +349,16 @@ class GeminiLiveTranslator:
                 session = self._session
                 if session is None:
                     continue
+                session_id = self._session_generation
+                if announced_session_id != session_id:
+                    announced_session_id = session_id
+                    yield TranslationEvent(session_id=session_id, session_started=True)
                 rotate_connection = False
                 async for message in session.receive():
+                    # Ignore any buffered packets (including resumption tokens)
+                    # from a connection that a sender/watchdog already replaced.
+                    if self._session is not session:
+                        break
                     go_away_time_left = self._process_control_message(message)
                     if go_away_time_left is not None:
                         self._log(
@@ -303,18 +375,13 @@ class GeminiLiveTranslator:
                         self._last_server_message_at = time.monotonic()
                         if event is not None:
                             self._last_subtitle_message_at = self._last_server_message_at
-                            if event.input_text:
-                                self._last_input_transcription_at = self._last_server_message_at
-                                if self._translation_wait_started_at is None:
-                                    self._translation_wait_started_at = self._last_server_message_at
-                            if event.output_text:
-                                self._last_output_translation_at = self._last_server_message_at
-                                self._translation_wait_started_at = None
+                            self._observe_transcription(event, self._last_server_message_at)
                     if self._websocket_diagnostics is not None:
                         self._websocket_diagnostics.note_server_message(
                             bool(event is not None and event.output_text)
                         )
                     if event:
+                        event.session_id = session_id
                         yield event
                     if self._closed:
                         return
@@ -322,6 +389,11 @@ class GeminiLiveTranslator:
                     await self._drop_session(expected_session=session, reason="server_go_away")
                     continue
             except Exception as exc:
+                if self._session is not session:
+                    continue
+                fatal = not is_retryable_connection_error(exc)
+                if fatal:
+                    self._terminal_error = exc
                 level = "info" if self._is_expected_reconnect_error(exc) else "warning"
                 self._log(
                     level,
@@ -330,8 +402,8 @@ class GeminiLiveTranslator:
                     exc_info=(level == "warning"),
                 )
                 await self._drop_session(expected_session=session, reason="receive_error")
-                yield TranslationEvent(error=str(exc))
-                if not self.reconnect:
+                yield TranslationEvent(error=str(exc) or type(exc).__name__, fatal=fatal)
+                if fatal or not self.reconnect:
                     return
                 await asyncio.sleep(self.reconnect_delay_seconds)
 
@@ -428,13 +500,20 @@ class GeminiLiveTranslator:
         if server_content is None:
             return None
 
-        input_text = self._transcription_text(getattr(server_content, "input_transcription", None))
-        output_text = self._transcription_text(getattr(server_content, "output_transcription", None))
+        input_transcription = getattr(server_content, "input_transcription", None)
+        output_transcription = getattr(server_content, "output_transcription", None)
         turn_complete = bool(getattr(server_content, "turn_complete", False))
         if isinstance(server_content, dict):
+            input_transcription = server_content.get("input_transcription", server_content.get("inputTranscription"))
+            output_transcription = server_content.get("output_transcription", server_content.get("outputTranscription"))
             turn_complete = bool(
                 server_content.get("turn_complete", server_content.get("turnComplete", False))
             )
+        input_text = self._transcription_text(input_transcription)
+        output_text = self._transcription_text(output_transcription)
+        language = getattr(input_transcription, "language_code", None) or getattr(input_transcription, "languageCode", None)
+        if isinstance(input_transcription, dict):
+            language = input_transcription.get("language_code", input_transcription.get("languageCode"))
 
         model_turn = getattr(server_content, "model_turn", None)
         if model_turn:
@@ -447,8 +526,26 @@ class GeminiLiveTranslator:
                 input_text=input_text,
                 output_text=output_text,
                 turn_complete=turn_complete,
+                input_language_code=str(language) if language else None,
             )
         return None
+
+    def _observe_transcription(self, event: TranslationEvent, now: float) -> None:
+        if event.input_text:
+            self._last_input_transcription_at = now
+            language = (event.input_language_code or "").lower().replace("_", "-").split("-")[0]
+            target = self.target_language_code.lower().replace("_", "-").split("-")[0]
+            self._translation_expected = self.echo_target_language or bool(language and language != target)
+            if not self._translation_expected:
+                self._translation_wait_started_at = None
+            elif self._translation_wait_started_at is None:
+                self._translation_wait_started_at = now
+        if event.output_text:
+            self._last_output_translation_at = now
+            self._translation_wait_started_at = None
+        if event.turn_complete:
+            self._translation_expected = False
+            self._translation_wait_started_at = None
 
     @staticmethod
     def _transcription_text(transcription: Any) -> str | None:
@@ -495,6 +592,7 @@ class GeminiLiveTranslator:
             self._last_input_transcription_at = None
             self._last_output_translation_at = None
             self._translation_wait_started_at = None
+            self._translation_expected = False
             self._last_audio_sent_at = None
             if watchdog is not None and watchdog is not asyncio.current_task():
                 watchdog.cancel()
@@ -502,7 +600,12 @@ class GeminiLiveTranslator:
             if session_cm is not None:
                 self._log("info", "Gemini session closing | reason=%s", reason)
                 try:
-                    await session_cm.__aexit__(None, None, None)
+                    await asyncio.wait_for(
+                        session_cm.__aexit__(None, None, None),
+                        timeout=self.cleanup_timeout_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    self._log("warning", "Timed out while closing Gemini WebSocket")
                 except Exception:
                     self._log("debug", "Error while closing Gemini session", exc_info=True)
                 finally:
@@ -524,7 +627,11 @@ class GeminiLiveTranslator:
             return
         try:
             try:
-                await client.aio.aclose()
+                await asyncio.wait_for(
+                    client.aio.aclose(), timeout=self.cleanup_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                self._log("warning", "Timed out while closing async Gemini client")
             except Exception:
                 self._log("debug", "Error while closing async Gemini client", exc_info=True)
         finally:
@@ -599,7 +706,8 @@ class GeminiLiveTranslator:
 
     def _subtitle_data_is_stalled(self, now: float) -> bool:
         timeout = self.subtitle_data_timeout_seconds
-        if timeout <= 0 or self._last_audio_sent_at is None:
+        if (timeout <= 0 or self._last_audio_sent_at is None
+                or not self._translation_expected or self._translation_wait_started_at is None):
             return False
         if now - self._last_audio_sent_at >= timeout:
             return False
@@ -610,6 +718,7 @@ class GeminiLiveTranslator:
         timeout = self.translation_output_timeout_seconds
         if (
             timeout <= 0
+            or not self._translation_expected
             or self._last_audio_sent_at is None
             or self._translation_wait_started_at is None
             or self._last_input_transcription_at is None

@@ -75,6 +75,9 @@ async def run(path: Path) -> None:
         sample_rate=SAMPLE_RATE,
         logger=logger,
         reconnect=False,
+        connect_timeout_seconds=float(gemini_cfg.get("connect_timeout_seconds", 15)),
+        send_timeout_seconds=float(gemini_cfg.get("send_timeout_seconds", 5)),
+        cleanup_timeout_seconds=float(gemini_cfg.get("cleanup_timeout_seconds", 2)),
         websocket_ping_interval_seconds=float(
             gemini_cfg.get("websocket_ping_interval_seconds", 20)
         ),

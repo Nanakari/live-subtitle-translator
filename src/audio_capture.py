@@ -16,7 +16,9 @@ class SystemAudioCaptureError(RuntimeError):
 @dataclass
 class SystemAudioCapture:
     sample_rate: int = 16000
-    channels: int = 1
+    # None selects the device's native channel count. Legacy channels=1 is
+    # also automatic: WASAPI single-channel recording can return corrupt data.
+    channels: int | None = None
     chunk_ms: int = 100
     speaker_name: str = ""
 
@@ -70,7 +72,9 @@ class SystemAudioCapture:
             )
 
         try:
-            loopback = sc.get_microphone(speaker.name, include_loopback=True)
+            loopback = sc.get_microphone(speaker.id, include_loopback=True)
+            if not loopback.isloopback:
+                raise SystemAudioCaptureError("Selected capture endpoint is not a loopback device.")
         except Exception as exc:
             devices = ", ".join(m.name for m in sc.all_microphones(include_loopback=True))
             raise SystemAudioCaptureError(
@@ -78,8 +82,20 @@ class SystemAudioCapture:
                 f"Default speaker: {speaker.name!r}. Available capture devices: {devices or 'none'}"
             ) from exc
 
+        available_channels = int(loopback.channels)
+        requested_channels = int(self.channels) if self.channels is not None else 1
+        capture_channels = available_channels if requested_channels == 1 else requested_channels
+        if capture_channels < 2 or capture_channels > available_channels:
+            raise SystemAudioCaptureError(
+                "Audio capture stopped: a playback device with at least two capture channels "
+                "is required for reliable WASAPI recording. "
+                f"Device: {speaker.name!r}; available channels: {available_channels}; "
+                f"requested channels: {capture_channels}. Select a stereo playback device "
+                "or set audio.channels to null for automatic selection."
+            )
+
         frames_per_chunk = max(1, int(self.sample_rate * self.chunk_ms / 1000))
-        with loopback.recorder(samplerate=self.sample_rate, channels=self.channels) as recorder:
+        with loopback.recorder(samplerate=self.sample_rate, channels=capture_channels) as recorder:
             while True:
                 if stop_event is not None and stop_event.is_set():
                     break
