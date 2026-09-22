@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
     args = parser.parse_args()
+    if not re.fullmatch(r"v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", args.version):
+        parser.error("Use a version such as v0.1.0")
     if sys.platform != "win32":
         parser.error("Build this release on Windows x64")
     root = Path(__file__).resolve().parents[1]

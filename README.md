@@ -192,6 +192,9 @@ Build a Windows x64 portable package on Windows with
 `python scripts/build_windows.py --version v0.1.0`. The builder runs an offline
 smoke test of the frozen executable and writes the ZIP and SHA-256 checksum to
 `dist/`. It copies only the public configuration and documentation into the package.
+Use a standard CPython environment for release builds. The manually triggered
+`Windows portable build` GitHub Actions workflow uses Windows x64 and Python 3.12,
+runs the tests, and uploads the verified package as a workflow artifact.
 
 ```powershell
 .\.venv\Scripts\python.exe -m compileall -q app.py scripts src
