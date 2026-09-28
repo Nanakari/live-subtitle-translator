@@ -30,7 +30,7 @@ jobs:
           test "$(jq -r .conclusion <<< "$metadata")" = success
           test "$(jq -r .workflowName <<< "$metadata")" = "Windows portable build"
           echo "sha=$(jq -r .headSha <<< "$metadata")" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: windows-x64-portable
           run-id: ${{ inputs.build_run_id }}
