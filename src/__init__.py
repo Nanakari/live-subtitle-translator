@@ -1,1 +1,0 @@
-"""Gemini Live Translator package."""

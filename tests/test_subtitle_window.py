@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from src.subtitle_window import SubtitleWindow, SubtitleWindowConfig
+from live_subtitle_translator.subtitle_window import SubtitleWindow, SubtitleWindowConfig
 
 
 class SubtitleWindowTests(unittest.TestCase):
@@ -14,7 +14,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._pending_zh_segments = [(10.0, 10.0, 10.1, "这是开心的事，"),
                                        (10.2, 10.1, 10.2, "所以我很开心。")]
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
                 window._flush_ready_segments()
         append.assert_called_once_with("It is a happy thing, so I am happy.", "这是开心的事，所以我很开心。")
         self.assertEqual(window._ja_fragments, [])
@@ -30,10 +30,10 @@ class SubtitleWindowTests(unittest.TestCase):
             (10.0, 10.0, 10.1, "这个能行", True),
         ]
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=10.9):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.9):
                 self.assertFalse(window._flush_ready_segments())
             window._pending_zh_segments.append((10.8, 10.8, 10.9, "吗？"))
-            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
                 self.assertTrue(window._flush_ready_segments())
         append.assert_called_once_with("", "这个能行吗？")
 
@@ -49,7 +49,7 @@ class SubtitleWindowTests(unittest.TestCase):
             (10.0, 10.0, 10.1, "这个能行", True),
         ]
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=10.1):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.1):
                 self.assertTrue(window._flush_ready_segments())
         append.assert_called_once_with("", "这个能行")
 
@@ -61,7 +61,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._pending_zh_segments = [(10.0, 10.0, 10.1, "吧")]
 
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
                 self.assertTrue(window._flush_ready_segments())
 
         append.assert_called_once_with("", "吧", force=True)
@@ -73,7 +73,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._ja_fragments = []
 
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=10.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.0):
                 window._consume_update(
                     "bilingual",
                     "第一原文。",
@@ -86,7 +86,7 @@ class SubtitleWindowTests(unittest.TestCase):
             self.assertIsNone(window._source_tail)
             self.assertIsNone(window._source_continuation)
 
-            with patch("src.subtitle_window.time.monotonic", return_value=20.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=20.0):
                 window._consume_update(
                     "bilingual",
                     None,
@@ -106,11 +106,11 @@ class SubtitleWindowTests(unittest.TestCase):
         window._ja_fragments = [(10.0, "It is a happy thing, so I am happy.")]
         window._pending_zh_segments = [(10.0, 10.0, 10.1, "这是开心的事，")]
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
                 window._flush_ready_segments()
             window._history = [{"ja": "It is a happy thing, so I am happy.", "zh": "这是开心的事，"}]
             window._pending_zh_segments = [(12.0, 10.1, 12.0, "所以我很开心。")]
-            with patch("src.subtitle_window.time.monotonic", return_value=13.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=13.0):
                 window._flush_ready_segments()
         self.assertEqual(len(append.call_args_list), 2)
         # The full source context is retained internally for pairing, but the
@@ -144,7 +144,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._ja_fragments = []
         window.config.pair_commit_delay_ms = 6000
 
-        with patch("src.subtitle_window.time.monotonic", return_value=20.0):
+        with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=20.0):
             with patch.object(window, "_append_block", return_value=True) as append:
                 window._consume_update(
                     "bilingual",
@@ -163,7 +163,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._ja_fragments = [(10.0, "I am happy. Yes.")]
         window._pending_zh_segments = [(10.0, 10.0, 10.1, "我很开心。")]
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
                 window._flush_ready_segments()
         append.assert_called_once_with("I am happy.", "我很开心。")
         self.assertEqual(window._ja_fragments, [(10.1, "Yes.")])
@@ -171,7 +171,7 @@ class SubtitleWindowTests(unittest.TestCase):
     def test_repeated_complete_replies_retain_two_source_packets(self) -> None:
         window = self.make_window()
         window._ja_fragments = []
-        with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+        with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
             window._add_ja_fragment("はい。")
             window._add_ja_fragment("はい。")
         self.assertEqual(len(window._ja_fragments), 2)
@@ -244,10 +244,10 @@ class SubtitleWindowTests(unittest.TestCase):
     def test_english_source_keeps_word_spaces_and_next_sentence(self) -> None:
         window = self.make_window()
         window._current_zh = ""
-        window._ja_fragments = [(10.0, "Yes. Where"), (10.8, "are people's thoughts"), (11.0, "on this?")]
+        window._ja_fragments = [(10.0, "Yes. Where"), (10.8, " are people's thoughts"), (11.0, " on this?")]
         window._pending_zh_segments = [(10.0, 10.0, 10.1, "是的。")]
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=10.7):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.7):
                 window._flush_ready_segments()
         append.assert_called_once_with("Yes.", "是的。")
         self.assertEqual(window._ja_text_for_range(10.8, 11.1, 11.1), "Where are people's thoughts on this?")
@@ -279,9 +279,9 @@ class SubtitleWindowTests(unittest.TestCase):
         window = self.make_window()
         window._history = [{"ja": "Horror live action.", "zh": "恐怖直播动作。"}]
         window._ja_fragments = []
-        with patch("src.subtitle_window.time.monotonic", return_value=11.0):
+        with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.0):
             window._add_ja_fragment("Horror live")
-            window._add_ja_fragment("people.")
+            window._add_ja_fragment(" people.")
         self.assertEqual(window._recent_ja_text(now=11.0), "Horror live people.")
 
     def test_sentence_pair_keeps_next_sentence_tail_in_same_packet(self) -> None:
@@ -291,7 +291,7 @@ class SubtitleWindowTests(unittest.TestCase):
         window._pending_zh_segments = [(10.0, 10.0, 10.1, "原来是这样。")]
         window.config.pair_commit_delay_ms = 300
         with patch.object(window, "_append_block", return_value=True) as append:
-            with patch("src.subtitle_window.time.monotonic", return_value=10.5):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.5):
                 window._flush_ready_segments()
         append.assert_called_once_with("そうなんだ。", "原来是这样。")
         self.assertEqual(window._ja_fragments, [(10.1, "じゃあ")])
@@ -313,22 +313,21 @@ class SubtitleWindowTests(unittest.TestCase):
         window = self.make_window()
         window._carry_ja = window._carry_zh = ""
         window._carry_started_at = None
-        window._recent_blocks = []
         window._history = []
         window.config.skip_filler_subtitles = False
         window.config.max_short_carry_ms = 1000
         with patch.object(window, "_should_carry_block", return_value=True):
-            with patch("src.subtitle_window.time.monotonic", return_value=10.0):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.0):
                 window._append_block("一", "甲")
-            with patch("src.subtitle_window.time.monotonic", return_value=10.8):
+            with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10.8):
                 window._append_block("二", "乙")
         self.assertEqual(window._carry_started_at, 10.0)
-        with patch("src.subtitle_window.time.monotonic", return_value=11.1):
+        with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=11.1):
             self.assertTrue(window._flush_stale_carry())
 
     def make_window(self) -> SubtitleWindow:
         window = SubtitleWindow.__new__(SubtitleWindow)
-        window.config = SubtitleWindowConfig(display_mode="sentence")
+        window.config = SubtitleWindowConfig(display_mode="sentence", stable_max_wait_ms=6500, stable_hard_max_wait_ms=12000, stable_pause_ms=1800, pair_commit_delay_ms=600, max_short_carry_ms=1800, max_pending_chars=180)
         window.logger = None
         window._current_zh = "这是持续增长的中文字幕片段"
         window._current_zh_started_at = 10.0

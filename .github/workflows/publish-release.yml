@@ -36,17 +36,28 @@ jobs:
           run-id: ${{ inputs.build_run_id }}
           github-token: ${{ github.token }}
           path: release-assets
-      - name: Verify checksum and publish v0.1.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate version, commit, notes, and checksums
+        id: release
+        env:
+          BUILD_SHA: ${{ steps.build.outputs.sha }}
+        run: python scripts/release_artifacts.py release-assets --expected-commit "$BUILD_SHA" --github-output "$GITHUB_OUTPUT"
+      - name: Publish the verified version
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_SHA: ${{ steps.build.outputs.sha }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_ARCHIVE: ${{ steps.release.outputs.archive }}
+          RELEASE_NOTES: ${{ steps.release.outputs.notes }}
+          IS_PRERELEASE: ${{ steps.release.outputs.prerelease }}
         shell: bash
         run: |
           set -euo pipefail
-          cd release-assets
-          sha256sum -c SHA256SUMS.txt
-          test -f LiveSubtitleTranslator-v0.1.0-windows-x64.zip
-          gh release create v0.1.0 LiveSubtitleTranslator-v0.1.0-windows-x64.zip SHA256SUMS.txt \
+          flags=(--latest)
+          if [[ "$IS_PRERELEASE" = true ]]; then flags=(--prerelease); fi
+          gh release create "$RELEASE_VERSION" "release-assets/$RELEASE_ARCHIVE" "release-assets/$RELEASE_NOTES" release-assets/SHA256SUMS.txt release-assets/release.json \
             --repo "$GITHUB_REPOSITORY" --target "$BUILD_SHA" \
-            --title "v0.1.0 - Windows portable release" \
-            --notes-file ../RELEASE_NOTES_v0.1.0.md --latest
+            --title "$RELEASE_VERSION - Windows portable release" \
+            --notes-file "release-assets/$RELEASE_NOTES" "${flags[@]}"

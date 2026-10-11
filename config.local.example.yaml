@@ -1,5 +1,6 @@
 # Copy this file to config.local.yaml for settings specific to your machine.
-# config.local.yaml is ignored by Git and overrides values in config.yaml.
+# config.local.yaml is ignored by Git and overrides the bundled defaults.
+# See src/live_subtitle_translator/defaults.yaml for the complete option list.
 
 network:
   # Example: "http://127.0.0.1:7897"

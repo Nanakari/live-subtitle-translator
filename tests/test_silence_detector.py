@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from src.silence_detector import SilenceDetector
+from live_subtitle_translator.silence_detector import SilenceDetector
 
 
 class SilenceDetectorTests(unittest.TestCase):

@@ -30,7 +30,7 @@ if errorlevel 1 (
 )
 
 echo Checking dependencies...
-"%PYTHON_EXE%" -c "import google.genai, numpy, soundcard, soundfile, scipy, yaml, pystray, PIL" >nul 2>nul
+"%PYTHON_EXE%" -c "import live_subtitle_translator, google.genai, numpy, soundcard, yaml, pystray, PIL" >nul 2>nul
 
 if errorlevel 1 (
     echo Installing dependencies...

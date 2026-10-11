@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.desktop_runtime import DesktopControlState, SettingsStore
+from live_subtitle_translator.desktop_runtime import DesktopControlState, SettingsStore
 
 
 class DesktopRuntimeTests(unittest.TestCase):

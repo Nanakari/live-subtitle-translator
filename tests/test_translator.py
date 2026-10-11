@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, Mock
 
-from src.gemini_live_translate import (
+from live_subtitle_translator.gemini_live_translate import (
     GeminiLiveTranslator,
     TranslationEvent,
     WebSocketControlDiagnostics,
@@ -310,7 +310,7 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
         handler = WebSocketControlLogHandler(diagnostics)
 
         with patch(
-            "src.gemini_live_translate.time.monotonic",
+            "live_subtitle_translator.gemini_live_translate.time.monotonic",
             side_effect=[100.0, 101.0, 102.0, 103.0],
         ):
             handler.emit(logging.LogRecord("ws", logging.DEBUG, "", 0, "> BINARY secret", (), None))
@@ -333,7 +333,7 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
         handler = WebSocketControlLogHandler(diagnostics)
 
         with patch(
-            "src.gemini_live_translate.time.monotonic",
+            "live_subtitle_translator.gemini_live_translate.time.monotonic",
             side_effect=[200.0, 201.0, 260.0],
         ):
             handler.emit(logging.LogRecord("ws", logging.DEBUG, "", 0, "% sent keepalive ping", (), None))

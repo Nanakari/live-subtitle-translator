@@ -44,16 +44,25 @@ class DesktopControlState:
         self.pause_event = threading.Event()
         self.auto_sleep_event = threading.Event()
         self.device_change_event = threading.Event()
+        self.capture_reset_event = threading.Event()
         self._lock = threading.Lock()
+        self._audio_generation = 0
         self._audio_device = audio_device
         self._visible = True
 
     def toggle_paused(self) -> bool:
-        if self.pause_event.is_set():
-            self.pause_event.clear()
-            return False
-        self.pause_event.set()
-        return True
+        with self._lock:
+            if self.pause_event.is_set():
+                self.pause_event.clear()
+                return False
+            self._audio_generation += 1
+            self.capture_reset_event.set()
+            self.pause_event.set()
+            return True
+
+    def audio_generation(self) -> int:
+        with self._lock:
+            return self._audio_generation
 
     def audio_device(self) -> str:
         with self._lock:

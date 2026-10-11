@@ -37,6 +37,7 @@ class SystemAudioCapture:
         stop_event: threading.Event | None = None,
         interrupt_event: threading.Event | None = None,
         pause_event: threading.Event | None = None,
+        reset_event: threading.Event | None = None,
     ) -> Iterator[np.ndarray]:
         try:
             import soundcard as sc
@@ -95,17 +96,29 @@ class SystemAudioCapture:
             )
 
         frames_per_chunk = max(1, int(self.sample_rate * self.chunk_ms / 1000))
-        with loopback.recorder(samplerate=self.sample_rate, channels=capture_channels) as recorder:
-            while True:
-                if stop_event is not None and stop_event.is_set():
-                    break
-                if interrupt_event is not None and interrupt_event.is_set():
-                    break
-                if pause_event is not None and pause_event.is_set():
-                    time.sleep(0.05)
-                    continue
-                data = recorder.record(numframes=frames_per_chunk)
-                yield self._as_mono_float32(data)
+        def stopped() -> bool:
+            return bool((stop_event is not None and stop_event.is_set()) or
+                        (interrupt_event is not None and interrupt_event.is_set()))
+
+        def paused() -> bool:
+            return pause_event is not None and pause_event.is_set()
+
+        while not stopped():
+            if paused():
+                time.sleep(0.05)
+                continue
+            if reset_event is not None:
+                reset_event.clear()
+            # A manual pause exits this context, dropping WASAPI's pending
+            # audio. Resume always creates a fresh recorder.
+            with loopback.recorder(samplerate=self.sample_rate, channels=capture_channels) as recorder:
+                while not stopped() and not paused():
+                    if reset_event is not None and reset_event.is_set():
+                        break
+                    data = recorder.record(numframes=frames_per_chunk)
+                    if stopped() or paused() or (reset_event is not None and reset_event.is_set()):
+                        break
+                    yield self._as_mono_float32(data)
 
     @staticmethod
     def _as_mono_float32(data: np.ndarray) -> np.ndarray:

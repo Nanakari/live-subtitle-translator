@@ -12,13 +12,40 @@ from typing import Any, AsyncIterator
 
 import numpy as np
 
-from src.connection_errors import is_resumption_rejected, is_retryable_connection_error
-from src.logger import register_secret
+from live_subtitle_translator.config import default_config
+from live_subtitle_translator.connection_errors import is_resumption_rejected, is_retryable_connection_error
+from live_subtitle_translator.logger import register_secret
 
 
 MISSING_API_KEY_MESSAGE = (
-    "Missing Gemini API key. Set gemini.api_key in config.yaml or set {env_name}."
+    "Missing Gemini API key. Set gemini.api_key in config.local.yaml or set {env_name}."
 )
+_DEFAULTS = default_config()
+_GEMINI_DEFAULTS = _DEFAULTS["gemini"]
+
+
+def translator_options(config: dict) -> dict:
+    """Use one configuration adapter for the desktop and file diagnostic."""
+    gemini = config["gemini"]
+    options = {key: gemini[key] for key in (
+        "model", "target_language_code", "api_key_env",
+        "echo_target_language", "reconnect", "session_resumption",
+        "context_window_compression", "websocket_control_logging",
+    )}
+    options.update({key: float(gemini[key]) for key in (
+        "reconnect_delay_seconds", "connect_timeout_seconds", "send_timeout_seconds",
+        "cleanup_timeout_seconds", "websocket_ping_interval_seconds",
+        "websocket_close_timeout_seconds", "server_data_timeout_seconds",
+        "subtitle_data_timeout_seconds", "translation_output_timeout_seconds",
+    )})
+    ping_timeout = gemini["websocket_ping_timeout_seconds"]
+    options.update(
+        api_key=gemini["api_key"] or None,
+        sample_rate=int(config["audio"]["sample_rate"]),
+        log_latency_metrics=bool(config["app"]["log_latency_metrics"]),
+        websocket_ping_timeout_seconds=None if ping_timeout is None else float(ping_timeout),
+    )
+    return options
 
 
 @dataclass
@@ -128,28 +155,28 @@ class WebSocketControlLogHandler(logging.Handler):
 class GeminiLiveTranslator:
     def __init__(
         self,
-        model: str = "gemini-3.5-live-translate-preview",
-        target_language_code: str = "zh-Hans",
-        echo_target_language: bool = False,
+        model: str = _GEMINI_DEFAULTS["model"],
+        target_language_code: str = _GEMINI_DEFAULTS["target_language_code"],
+        echo_target_language: bool = _GEMINI_DEFAULTS["echo_target_language"],
         api_key: str | None = None,
-        api_key_env: str = "GEMINI_API_KEY",
-        sample_rate: int = 16000,
-        reconnect: bool = True,
-        reconnect_delay_seconds: float = 2.0,
-        session_resumption: bool = True,
-        context_window_compression: bool = True,
-        websocket_ping_interval_seconds: float = 20.0,
-        websocket_ping_timeout_seconds: float | None = None,
-        websocket_close_timeout_seconds: float = 10.0,
-        websocket_control_logging: bool = True,
-        server_data_timeout_seconds: float = 120.0,
-        subtitle_data_timeout_seconds: float = 45.0,
-        translation_output_timeout_seconds: float = 45.0,
-        log_latency_metrics: bool = False,
+        api_key_env: str = _GEMINI_DEFAULTS["api_key_env"],
+        sample_rate: int = _DEFAULTS["audio"]["sample_rate"],
+        reconnect: bool = _GEMINI_DEFAULTS["reconnect"],
+        reconnect_delay_seconds: float = _GEMINI_DEFAULTS["reconnect_delay_seconds"],
+        session_resumption: bool = _GEMINI_DEFAULTS["session_resumption"],
+        context_window_compression: bool = _GEMINI_DEFAULTS["context_window_compression"],
+        websocket_ping_interval_seconds: float = _GEMINI_DEFAULTS["websocket_ping_interval_seconds"],
+        websocket_ping_timeout_seconds: float | None = _GEMINI_DEFAULTS["websocket_ping_timeout_seconds"],
+        websocket_close_timeout_seconds: float = _GEMINI_DEFAULTS["websocket_close_timeout_seconds"],
+        websocket_control_logging: bool = _GEMINI_DEFAULTS["websocket_control_logging"],
+        server_data_timeout_seconds: float = _GEMINI_DEFAULTS["server_data_timeout_seconds"],
+        subtitle_data_timeout_seconds: float = _GEMINI_DEFAULTS["subtitle_data_timeout_seconds"],
+        translation_output_timeout_seconds: float = _GEMINI_DEFAULTS["translation_output_timeout_seconds"],
+        log_latency_metrics: bool = _DEFAULTS["app"]["log_latency_metrics"],
         logger: Any | None = None,
-        connect_timeout_seconds: float = 15.0,
-        send_timeout_seconds: float = 5.0,
-        cleanup_timeout_seconds: float = 2.0,
+        connect_timeout_seconds: float = _GEMINI_DEFAULTS["connect_timeout_seconds"],
+        send_timeout_seconds: float = _GEMINI_DEFAULTS["send_timeout_seconds"],
+        cleanup_timeout_seconds: float = _GEMINI_DEFAULTS["cleanup_timeout_seconds"],
     ) -> None:
         for name, value in (
             ("connect_timeout_seconds", connect_timeout_seconds),

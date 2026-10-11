@@ -1,2 +1,1 @@
--r requirements.txt
-pyinstaller==6.16.0
+-e .[build]

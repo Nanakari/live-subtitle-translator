@@ -7,9 +7,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-import app
+from live_subtitle_translator import app
 import numpy as np
-from src.desktop_runtime import DesktopControlState
+from live_subtitle_translator.desktop_runtime import DesktopControlState
 
 
 class FakeWindow:
@@ -60,6 +60,7 @@ class BrokenCapture:
         stop_event=None,
         interrupt_event=None,
         pause_event=None,
+        reset_event=None,
     ):
         raise app.SystemAudioCaptureError("No usable loopback device was found")
         yield
@@ -74,6 +75,7 @@ class IdleCapture:
         stop_event=None,
         interrupt_event=None,
         pause_event=None,
+        reset_event=None,
     ):
         while not stop_event.is_set() and not interrupt_event.is_set():
             stop_event.wait(0.01)
@@ -91,7 +93,7 @@ class PermanentFailureTranslator(WaitingTranslator):
     async def start(self) -> None:
         self.start_calls += 1
         raise RuntimeError(
-            "Missing Gemini API key. Set gemini.api_key in config.yaml or set GEMINI_API_KEY."
+            "Missing Gemini API key. Set gemini.api_key in config.local.yaml or set GEMINI_API_KEY."
         )
 
 
@@ -116,6 +118,7 @@ class ContinuousCapture:
         stop_event=None,
         interrupt_event=None,
         pause_event=None,
+        reset_event=None,
     ):
         while not stop_event.is_set() and not interrupt_event.is_set():
             time.sleep(0.01)
@@ -130,6 +133,7 @@ class SwitchableCapture(ContinuousCapture):
         stop_event=None,
         interrupt_event=None,
         pause_event=None,
+        reset_event=None,
     ):
         while not stop_event.is_set() and not interrupt_event.is_set():
             time.sleep(0.01)

@@ -14,9 +14,9 @@ from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.frames import Close
 from websockets.http11 import Response
 
-import app
-from src.connection_errors import is_resumption_rejected, is_retryable_connection_error
-from src.gemini_live_translate import GeminiLiveTranslator, TranslationEvent
+from live_subtitle_translator import app
+from live_subtitle_translator.connection_errors import is_resumption_rejected, is_retryable_connection_error
+from live_subtitle_translator.gemini_live_translate import GeminiLiveTranslator, TranslationEvent
 from tests import test_desktop as desktop
 from tests import test_subtitle_window as subtitles
 
@@ -288,7 +288,6 @@ class SubtitleSessionTests(unittest.TestCase):
         w._pending_zh_segments = [(10, 10, 10, "OLD_PENDING", False)]
         w._carry_ja, w._carry_zh, w._carry_started_at = "old", "old", 10
         w._history = [{"ja": "old", "zh": "old"}]
-        w._recent_blocks = [("old", "old")]
         w._turn_complete_pending = True
         w._consume_update("reset_pairing", None, None)
         w._consume_update("bilingual", None, "NEW_TEXT!")
@@ -298,7 +297,6 @@ class SubtitleSessionTests(unittest.TestCase):
         self.assertIsNone(w._carry_started_at)
         self.assertFalse(w._turn_complete_pending)
         self.assertEqual(w._history, [])
-        self.assertEqual(w._recent_blocks, [])
 
     def test_successful_resumption_keeps_pending_text_in_same_logical_session(self):
         w = self.make_window()

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, MagicMock, patch
 
 import numpy as np
 
-from src.audio_capture import SystemAudioCapture, SystemAudioCaptureError
+from live_subtitle_translator.audio_capture import SystemAudioCapture, SystemAudioCaptureError
 
 
 class AudioCaptureTests(unittest.TestCase):
@@ -74,6 +75,47 @@ class AudioCaptureTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemAudioCaptureError, "available channels: 2"):
                 next(SystemAudioCapture(channels=6).stream_audio_chunks())
         loopback.recorder.assert_not_called()
+
+    def check_pause_reopens_recorder(self, rapid_resume: bool):
+        paused = threading.Event()
+        reset = threading.Event()
+        backend, loopback = self.make_backend(2, np.ones((2, 2), dtype=np.float32))
+        first = loopback.recorder.return_value
+        fresh = MagicMock()
+        fresh.__enter__.return_value.record.return_value = np.full((2, 2), 0.25, dtype=np.float32)
+        loopback.recorder.side_effect = [first, fresh]
+
+        def pause_during_record(**kwargs):
+            paused.set()
+            reset.set()
+            if rapid_resume:
+                paused.clear()
+            return np.ones((2, 2), dtype=np.float32)
+
+        def resume_after_recorder_closed(_seconds):
+            first.__exit__.assert_called_once()
+            paused.clear()
+
+        first.__enter__.return_value.record.side_effect = pause_during_record
+        with patch.dict(sys.modules, {"soundcard": backend}), patch(
+            "live_subtitle_translator.audio_capture.time.sleep", side_effect=resume_after_recorder_closed
+        ):
+            stream = SystemAudioCapture().stream_audio_chunks(pause_event=paused, reset_event=reset)
+            try:
+                audio = next(stream)
+            finally:
+                stream.close()
+        self.assertEqual(loopback.recorder.call_count, 2)
+        first.__exit__.assert_called_once()
+        fresh.__exit__.assert_called_once()
+        np.testing.assert_allclose(audio, [0.25, 0.25])
+        self.assertFalse(reset.is_set())
+
+    def test_pause_discards_inflight_audio_and_closes_recorder_before_waiting(self):
+        self.check_pause_reopens_recorder(rapid_resume=False)
+
+    def test_rapid_pause_resume_still_discards_backend_buffer(self):
+        self.check_pause_reopens_recorder(rapid_resume=True)
 
 
 if __name__ == "__main__":

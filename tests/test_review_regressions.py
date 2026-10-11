@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from src.logger import register_secret, setup_logger
+from live_subtitle_translator.logger import register_secret, setup_logger
 from tests import test_subtitle_window as subtitle_tests
 
 
@@ -37,7 +37,7 @@ class SubtitleRegressionTests(unittest.TestCase):
     def test_source_only_stable_timeout_commits_without_turn_event(self):
         w = window()
         w.config.subtitle_language = "source"
-        with patch("src.subtitle_window.time.monotonic", return_value=10):
+        with patch("live_subtitle_translator.subtitle_state.time.monotonic", return_value=10):
             w._consume_update("bilingual", "unpunctuated original", None)
         self.assertTrue(w._flush_stale_stable_segment(now=100))
         self.assertEqual(w._history[-1]["ja"], "unpunctuated original")

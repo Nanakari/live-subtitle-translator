@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "live-subtitle-translator"
+version = "0.1.0"
+description = "Windows desktop subtitles using Gemini Live translation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "google-genai==1.47.0",
+  "numpy==2.0.2",
+  "soundcard==0.4.6",
+  "PyYAML==6.0.3",
+  "pystray==0.19.5",
+  "Pillow==12.3.0",
+]
+
+[project.optional-dependencies]
+build = ["pyinstaller==6.16.0"]
+files = ["soundfile==0.13.1", "scipy==1.13.1"]
+
+[project.gui-scripts]
+live-subtitle-translator = "live_subtitle_translator.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+live_subtitle_translator = ["defaults.yaml"]

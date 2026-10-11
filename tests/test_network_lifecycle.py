@@ -6,9 +6,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-import app
-from src.desktop_runtime import DesktopControlState
-from src.gemini_live_translate import GeminiLiveTranslator
+from live_subtitle_translator import app
+from live_subtitle_translator.desktop_runtime import DesktopControlState
+from live_subtitle_translator.gemini_live_translate import GeminiLiveTranslator
 from tests import test_desktop as desktop
 
 

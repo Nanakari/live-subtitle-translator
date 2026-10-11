@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 app.log
 *.log
+*.log.*
 config.local.yaml
 desktop_state.json
 desktop_state.json.tmp
@@ -13,3 +14,7 @@ build/
 dist/
 *.spec
 *.lnk
+logs/
+.runtime/
+src/*.egg-info/
+config.yaml

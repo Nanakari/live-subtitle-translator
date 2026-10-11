@@ -3,7 +3,9 @@ app:
   debug: false
   # Optional stage timestamps; contains no audio or subtitle text.
   log_latency_metrics: false
-  log_file: "app.log"
+  log_file: "logs/app.log"
+  log_max_bytes: 5242880
+  log_backup_count: 3
 
 audio:
   sample_rate: 16000
@@ -26,13 +28,11 @@ network:
   no_proxy: "localhost,127.0.0.1,::1"
 
 gemini:
-  # Optional: paste your API key here if you do not want to use an environment variable.
-  # Warning: config.yaml is plain text. Do not share or commit it with a real API key.
+  # Set a private key in config.local.yaml or the environment, never in this file.
   api_key: ""
   # Fallback: used only when api_key is empty.
   api_key_env: "GEMINI_API_KEY"
   model: "gemini-3.5-live-translate-preview"
-  source_language: "ja"
   target_language_code: "zh-Hans"
   echo_target_language: false
   show_input_transcription: true
@@ -135,7 +135,4 @@ subtitle:
   clear_ja_after_pair: true
   background_color: "#111111"
   text_color: "#ffffff"
-  accent_color: "#ffffff"
-  # 0 disables text truncation; the subtitle window wraps long text instead.
-  max_chars: 0
-  dedup: true
+  accent_color: "#dbeafe"
