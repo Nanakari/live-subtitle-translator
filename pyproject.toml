@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 build = ["pyinstaller==6.16.0"]
-files = ["soundfile==0.13.1", "scipy==1.13.1"]
+files = ["soundfile==0.14.0", "scipy==1.13.1"]
 
 [project.gui-scripts]
 live-subtitle-translator = "live_subtitle_translator.app:main"
