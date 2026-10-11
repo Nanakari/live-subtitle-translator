@@ -9,7 +9,7 @@ description = "Windows desktop subtitles using Gemini Live translation"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "google-genai==1.47.0",
+  "google-genai==2.29.0",
   "numpy==2.0.2",
   "soundcard==0.4.6",
   "PyYAML==6.0.3",
