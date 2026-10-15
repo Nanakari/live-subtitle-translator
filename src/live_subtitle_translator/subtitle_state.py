@@ -903,6 +903,12 @@ class SubtitleState:
         complete: list[str] = []
         start = 0
         for index, char in enumerate(text):
+            # A Live delta may end halfway through a decimal ("3." + "14").
+            # Keep that ambiguous suffix until another character disambiguates
+            # it. Turn completion and the existing stable deadlines still flush
+            # pending text when the period really does end an integer sentence.
+            if char == "." and index == len(text) - 1 and index > 0 and text[index - 1].isdigit():
+                continue
             if self._is_sentence_boundary(text, index):
                 complete.append(text[start : index + 1].strip())
                 start = index + 1
