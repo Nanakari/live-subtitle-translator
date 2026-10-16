@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-build = ["pyinstaller==6.16.0"]
+build = ["pyinstaller==6.22.3"]
 files = ["soundfile==0.13.1", "scipy==1.13.1"]
 
 [project.gui-scripts]
