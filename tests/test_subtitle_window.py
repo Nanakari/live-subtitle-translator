@@ -261,7 +261,7 @@ class SubtitleWindowTests(unittest.TestCase):
     def test_display_replaces_sentence_periods_but_keeps_decimal_points(self) -> None:
         self.assertEqual(
             SubtitleWindow._display_text("原文。Next. 3.14｡"),
-            "原文 Next 3.14",
+            "原文  Next  3.14",
         )
 
     def test_render_items_replace_periods_without_mutating_pairing_history(self) -> None:
@@ -270,7 +270,7 @@ class SubtitleWindowTests(unittest.TestCase):
 
         self.assertEqual(
             window._build_render_items(),
-            [("Original Next", "ja"), ("原文 下一句", "zh")],
+            [("Original  Next", "ja"), ("原文  下一句", "zh")],
         )
         self.assertEqual(window._history[0]["ja"], "Original. Next.")
         self.assertEqual(window._history[0]["zh"], "原文。下一句。")

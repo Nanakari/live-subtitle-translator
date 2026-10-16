@@ -125,6 +125,7 @@ class GlobalPauseHotkey:
     WM_QUIT = 0x0012
     MOD_ALT = 0x0001
     MOD_CONTROL = 0x0002
+    MOD_NOREPEAT = 0x4000
     VK_SPACE = 0x20
 
     def __init__(self, callback: Callable[[], None]) -> None:
@@ -152,7 +153,7 @@ class GlobalPauseHotkey:
             user32.RegisterHotKey(
                 None,
                 self.HOTKEY_ID,
-                self.MOD_CONTROL | self.MOD_ALT,
+                self.MOD_CONTROL | self.MOD_ALT | self.MOD_NOREPEAT,
                 self.VK_SPACE,
             )
         )

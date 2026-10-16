@@ -50,7 +50,9 @@ def is_retryable_connection_error(exc: Exception) -> bool:
         if close.code == 1008:
             reason = close.reason.lower()
             return any(marker in reason for marker in ("session duration", "session durat", "goaway"))
-        return close.code in {1000, 1001, 1006, 1011, 1012, 1013, 1014}
+        # 1005 represents a valid Close frame with no status code; websockets
+        # treats a completed empty-frame handshake as ConnectionClosedOK.
+        return close.code in {1000, 1001, 1005, 1006, 1011, 1012, 1013, 1014}
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError, OSError, InvalidMessage)):
         return True
     # Some proxy/transport implementations expose only text. Avoid broad words

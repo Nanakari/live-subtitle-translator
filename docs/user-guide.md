@@ -51,7 +51,15 @@ Key settings:
 - `gemini.api_key_env`: environment-variable name for the API key; defaults to
   `GEMINI_API_KEY`.
 - `network.proxy_url`: optional proxy URL. Keep it empty for a direct
-  connection.
+  connection, even if the process or operating system has a proxy configured.
+  A configured URL takes precedence over inherited proxy variables and respects
+  `network.no_proxy`.
+- `app.error_display_delay_seconds`: show a recoverable connection error only
+  after it has persisted for 10 seconds (default). Short outages are logged and
+  retried without replacing subtitles. Repeated failures share the same deadline;
+  recovery clears the notice even before new subtitles arrive. Pause and silence
+  sleep cancel any pending notice. Set to 0 for immediate notices. Permanent
+  errors and failures with automatic reconnection disabled still show immediately.
 - `subtitle.layout_style`: `compact` (default) or `classic`.
 - `subtitle.always_on_top`: keeps the subtitle window above other windows.
 - `audio.channels`: `null` selects the playback device's native channel count.
@@ -71,6 +79,8 @@ Key settings:
 
 Pause and exit cancel in-flight connection/send tasks before closing the session.
 Resume waits for the previous disconnect to finish before starting a new session.
+Holding the pause hotkey does not repeatedly toggle pause and resume. Audio-device
+failures stop translation and display an immediate status in every language mode.
 
 Connection recovery distinguishes permanent request/authentication errors from
 network failures. HTTP 400/401/403/404 stop translation and show the error; HTTP
@@ -78,6 +88,8 @@ network failures. HTTP 400/401/403/404 stop translation and show the error; HTTP
 established connection fails. An explicitly rejected session-resumption handle
 is discarded and tried once as a fresh session. Network outages retain a valid
 handle; authentication failures do not trigger a fresh-session fallback.
+Normal WebSocket closures, including a Close frame without a status code, remain
+eligible for automatic reconnection.
 
 Subtitle and translation-output watchdogs require evidence that a translation
 is expected. With `echo_target_language: false`, target-language input and input
@@ -90,6 +102,9 @@ non-target-language code allows the content watchdogs to detect stalled output.
 
 - Sentence mode favors complete sentences. `subtitle.pair_commit_delay_ms`
   defaults to 300 ms for source/translation pairing.
+- Compact streaming keeps completed text visible while it waits for pairing or
+  short-phrase merging. Sentence boundaries use a wider two-space display gap;
+  short numeric sentences retain their separation rather than becoming decimals.
 - `subtitle.max_short_carry_ms` defaults to 1000 ms, measured from the first
   buffered short phrase; further fragments do not restart the deadline.
 - `subtitle.stable_max_wait_ms` is a 4000 ms soft deadline: after it, a long
@@ -124,6 +139,12 @@ non-target-language code allows the content watchdogs to detect stalled output.
 - Session-close logs distinguish shutdown, intentional disconnect, server
   rotation, send/receive errors, and watchdog expiry. Desktop sleep logs also
   distinguish user pause from detected silence.
+- Abnormal WebSocket EOF is logged as a warning even when automatic recovery
+  succeeds; the delayed subtitle-notice policy still applies. Transport-failure
+  records include bounded exception types, numeric OS/close codes, connection ID,
+  and recent audio/server activity ages without exception-message payloads.
+  Matching Ping/Pong timing is recorded even when Pong timeouts are disabled;
+  absence of older Pong logs alone was not evidence of a missing server reply.
 - Source fragments retain English word spaces and sentence periods. New source
   sentences can repeat earlier topics without losing their prefix. Compact
   single-line display still crops long text; use the classic layout when the

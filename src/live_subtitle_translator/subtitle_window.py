@@ -241,6 +241,10 @@ class SubtitleWindow(SubtitleState):
     def set_text(self, text: str) -> None:
         self._enqueue(("status" if self._is_status_text(text) else "zh", None, text, False))
 
+    def clear_status(self, expected_text: str) -> None:
+        """Remove a recovered error without overwriting newer UI state."""
+        self._enqueue(("clear_status", None, expected_text, False))
+
     def set_bilingual(
         self,
         input_text: str | None = None,

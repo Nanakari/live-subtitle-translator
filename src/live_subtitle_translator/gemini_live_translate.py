@@ -11,10 +11,12 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import numpy as np
+from websockets.frames import Frame, Opcode
 
 from live_subtitle_translator.config import default_config
 from live_subtitle_translator.connection_errors import is_resumption_rejected, is_retryable_connection_error
 from live_subtitle_translator.logger import register_secret
+from live_subtitle_translator.transport_diagnostics import describe_transport_error, is_expected_session_rotation
 
 
 MISSING_API_KEY_MESSAGE = (
@@ -44,6 +46,7 @@ def translator_options(config: dict) -> dict:
         sample_rate=int(config["audio"]["sample_rate"]),
         log_latency_metrics=bool(config["app"]["log_latency_metrics"]),
         websocket_ping_timeout_seconds=None if ping_timeout is None else float(ping_timeout),
+        use_environment_proxy=bool((config.get("network", {}).get("proxy_url") or "").strip()),
     )
     return options
 
@@ -60,6 +63,7 @@ class TranslationEvent:
     fatal: bool = False
     # Logical session identity is preserved across successful session resumption.
     session_id: int | None = None
+    # Emitted for each transport connection, even when the logical session resumes.
     session_started: bool = False
     input_language_code: str | None = None
 
@@ -113,6 +117,8 @@ class WebSocketControlDiagnostics:
                 self._age_ms(now, self.last_translation_at),
             )
         elif "received keepalive pong" in message:
+            if self.ping_sent_at is None:
+                return
             self.sink.info(
                 "WebSocket control | connection=%s event=pong_received rtt_ms=%s server_messages_since_ping=%d translation_messages_since_ping=%d",
                 self.connection_id,
@@ -145,10 +151,37 @@ class WebSocketControlLogHandler(logging.Handler):
     def __init__(self, diagnostics: WebSocketControlDiagnostics) -> None:
         super().__init__(level=logging.DEBUG)
         self.diagnostics = diagnostics
+        self._pending_ping: bytes | None = None
+        self._skip_keepalive_ping_line = False
 
     def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if "keepalive ping" in message or "keepalive pong" in message:
+        # websockets skips its "received keepalive pong" log when ping_timeout
+        # is None. Observe matching control frames without formatting payloads.
+        if record.msg in ("> %s", "< %s"):
+            if not isinstance(record.args, tuple) or len(record.args) != 1:
+                return
+            frame = record.args[0]
+            if not isinstance(frame, Frame):
+                return
+            if record.msg == "> %s" and frame.opcode == Opcode.PING:
+                self._pending_ping = bytes(frame.data)
+                self._skip_keepalive_ping_line = True
+                self.diagnostics.handle_control_log("sent keepalive ping")
+            elif (record.msg == "< %s" and frame.opcode == Opcode.PONG
+                  and self._pending_ping is not None and frame.data == self._pending_ping):
+                self._pending_ping = None
+                self.diagnostics.handle_control_log("received keepalive pong")
+            return
+        # These fixed messages contain no user data. Ignore headers and data
+        # frames without calling getMessage(), which can format audio/text.
+        message = record.msg
+        if not isinstance(message, str):
+            return
+        if "sent keepalive ping" in message and self._skip_keepalive_ping_line:
+            self._skip_keepalive_ping_line = False
+            return
+        if message in ("% sent keepalive ping", "% received keepalive pong",
+                       "- timed out waiting for keepalive pong"):
             self.diagnostics.handle_control_log(message)
 
 
@@ -177,6 +210,7 @@ class GeminiLiveTranslator:
         connect_timeout_seconds: float = _GEMINI_DEFAULTS["connect_timeout_seconds"],
         send_timeout_seconds: float = _GEMINI_DEFAULTS["send_timeout_seconds"],
         cleanup_timeout_seconds: float = _GEMINI_DEFAULTS["cleanup_timeout_seconds"],
+        use_environment_proxy: bool = False,
     ) -> None:
         for name, value in (
             ("connect_timeout_seconds", connect_timeout_seconds),
@@ -207,6 +241,7 @@ class GeminiLiveTranslator:
         self.connect_timeout_seconds = connect_timeout_seconds
         self.send_timeout_seconds = send_timeout_seconds
         self.cleanup_timeout_seconds = cleanup_timeout_seconds
+        self.use_environment_proxy = use_environment_proxy
         self._client = None
         self._session_cm = None
         self._session = None
@@ -227,6 +262,11 @@ class GeminiLiveTranslator:
         self._session_generation = 0
         self._translation_expected = False
 
+    @property
+    def is_connected(self) -> bool:
+        """Whether a successfully initialized transport is currently available."""
+        return self._session is not None and not self._closed
+
     async def start(self) -> None:
         api_key = self.api_key or os.getenv(self.api_key_env)
         if not api_key:
@@ -246,6 +286,7 @@ class GeminiLiveTranslator:
                     await self._open_session(api_key, resume_handle)
                     return
                 except Exception as exc:
+                    self._log_transport_failure("connect", exc)
                     if attempt == 0 and resume_handle and is_resumption_rejected(exc):
                         self._resumption_handle = None
                         self._log("info", "Session resumption was rejected; starting a fresh session")
@@ -342,6 +383,7 @@ class GeminiLiveTranslator:
         except Exception as exc:
             if self._session is not session:
                 return
+            self._log_transport_failure("send", exc)
             fatal = not is_retryable_connection_error(exc)
             if fatal:
                 self._terminal_error = exc
@@ -350,7 +392,6 @@ class GeminiLiveTranslator:
                 level,
                 "Gemini send failed; closing current session: %s",
                 exc,
-                exc_info=(level == "warning"),
             )
             await self._drop_session(expected_session=session, reason="audio_send_error")
             if fatal:
@@ -359,7 +400,7 @@ class GeminiLiveTranslator:
                 raise
 
     async def receive_translations(self) -> AsyncIterator[TranslationEvent]:
-        announced_session_id: int | None = None
+        announced_session: Any = None
         while not self._closed:
             if self._session is None:
                 try:
@@ -377,8 +418,8 @@ class GeminiLiveTranslator:
                 if session is None:
                     continue
                 session_id = self._session_generation
-                if announced_session_id != session_id:
-                    announced_session_id = session_id
+                if announced_session is not session:
+                    announced_session = session
                     yield TranslationEvent(session_id=session_id, session_started=True)
                 rotate_connection = False
                 async for message in session.receive():
@@ -418,6 +459,7 @@ class GeminiLiveTranslator:
             except Exception as exc:
                 if self._session is not session:
                     continue
+                self._log_transport_failure("receive", exc)
                 fatal = not is_retryable_connection_error(exc)
                 if fatal:
                     self._terminal_error = exc
@@ -426,7 +468,6 @@ class GeminiLiveTranslator:
                     level,
                     "Gemini receive failed; reconnecting if enabled: %s",
                     exc,
-                    exc_info=(level == "warning"),
                 )
                 await self._drop_session(expected_session=session, reason="receive_error")
                 yield TranslationEvent(error=str(exc) or type(exc).__name__, fatal=fatal)
@@ -484,7 +525,12 @@ class GeminiLiveTranslator:
             "ping_interval": self.websocket_ping_interval_seconds,
             "ping_timeout": self.websocket_ping_timeout_seconds,
             "close_timeout": self.websocket_close_timeout_seconds,
+            "trust_env": self.use_environment_proxy,
         }
+        if not self.use_environment_proxy:
+            # HTTPX's trust_env does not control websockets' own proxy lookup.
+            # An explicit None also bypasses OS-level proxy auto-discovery.
+            websocket_args["proxy"] = None
         if diagnostics is not None:
             websocket_logger = logging.getLogger(
                 f"gemini.websocket.control.{diagnostics.connection_id}"
@@ -496,6 +542,7 @@ class GeminiLiveTranslator:
             websocket_args["logger"] = websocket_logger
 
         return types.HttpOptions(
+            client_args={"trust_env": self.use_environment_proxy},
             async_client_args=websocket_args
         )
 
@@ -769,14 +816,20 @@ class GeminiLiveTranslator:
         if self.logger is not None:
             getattr(self.logger, level)(message, *args, **kwargs)
 
+    def _log_transport_failure(self, stage: str, exc: Exception) -> None:
+        now = time.monotonic()
+        diagnostics = self._websocket_diagnostics
+        self._log(
+            "info" if self._is_expected_reconnect_error(exc) else "warning",
+            "Gemini transport failure | stage=%s connection=%s %s session_age_ms=%s last_audio_age_ms=%s last_server_data_age_ms=%s",
+            stage,
+            diagnostics.connection_id if diagnostics is not None else self._connection_sequence,
+            describe_transport_error(exc),
+            self._age_ms(now, self._session_started_at),
+            self._age_ms(now, self._last_audio_sent_at),
+            self._age_ms(now, self._last_server_message_at),
+        )
+
     @staticmethod
     def _is_expected_reconnect_error(exc: Exception) -> bool:
-        text = str(exc).lower()
-        expected_markers = (
-            "goaway",
-            "session durat",
-            "no close frame received or sent",
-            "received 1008",
-            "connection aborted because the client failed to close",
-        )
-        return any(marker in text for marker in expected_markers)
+        return is_expected_session_rotation(str(exc))

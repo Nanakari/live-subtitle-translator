@@ -25,10 +25,14 @@ def apply_network_config(config: dict) -> None:
     proxy_url = (network.get("proxy_url") or "").strip()
     no_proxy = (network.get("no_proxy") or "").strip()
     if proxy_url:
-        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        # WebSocket-specific variables take precedence over HTTPS_PROXY, and
+        # lowercase variables take precedence on some platforms. Keep the
+        # configured route authoritative while retaining NO_PROXY handling.
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "WS_PROXY", "WSS_PROXY"):
             os.environ[name] = proxy_url
-    if no_proxy:
-        os.environ["NO_PROXY"] = no_proxy
+            os.environ[name.lower()] = proxy_url
+    for name in ("NO_PROXY", "no_proxy"):
+        os.environ[name] = no_proxy
 
 
 def resolve_config(override: dict[str, Any]) -> dict[str, Any]:

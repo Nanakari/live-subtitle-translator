@@ -1,6 +1,8 @@
 app:
   title: "Gemini Live Translator"
   debug: false
+  # Show retryable errors only after a continuous outage; 0 shows immediately.
+  error_display_delay_seconds: 10
   # Optional stage timestamps; contains no audio or subtitle text.
   log_latency_metrics: false
   log_file: "logs/app.log"

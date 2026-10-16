@@ -21,8 +21,10 @@ from live_subtitle_translator.gemini_live_translate import GeminiLiveTranslator,
 from live_subtitle_translator.logger import setup_logger
 from live_subtitle_translator.paths import application_root
 from live_subtitle_translator.process_control import DesktopProcessRegistration
+from live_subtitle_translator.recovery_notice import RecoveryNotice
 from live_subtitle_translator.silence_detector import SilenceDetector
 from live_subtitle_translator.subtitle_window import SubtitleWindow, SubtitleWindowConfig
+from live_subtitle_translator.transport_diagnostics import is_expected_session_rotation
 
 
 PROJECT_ROOT = application_root()
@@ -33,15 +35,7 @@ def load_config() -> dict:
 
 
 def is_expected_reconnect_message(message: str | None) -> bool:
-    text = (message or "").lower()
-    expected_markers = (
-        "goaway",
-        "session durat",
-        "no close frame received or sent",
-        "received 1008",
-        "connection aborted because the client failed to close",
-    )
-    return any(marker in text for marker in expected_markers)
+    return is_expected_session_rotation(message)
 
 
 def enqueue_latest(item_queue: queue.Queue, item: object) -> None:
@@ -83,6 +77,11 @@ async def run_translation(
     gemini_cfg = config.get("gemini", {})
     reconnect = bool(gemini_cfg['reconnect'])
     reconnect_delay = float(gemini_cfg['reconnect_delay_seconds'])
+    recovery_notice = RecoveryNotice(
+        window.set_text,
+        window.clear_status,
+        float(app_cfg['error_display_delay_seconds']),
+    )
     chunk_seconds = max(0.001, float(audio_cfg['chunk_ms']) / 1000)
     silence_detector = SilenceDetector(
         enabled=bool(audio_cfg['silence_sleep_enabled']),
@@ -178,7 +177,7 @@ async def run_translation(
                 if controls.device_change_event.is_set():
                     continue
                 logger.error(str(exc))
-                window.set_text(str(exc))
+                window.set_text(f"Audio capture stopped: {exc}")
                 stop_event.set()
             except Exception as exc:
                 if controls.device_change_event.is_set():
@@ -209,7 +208,7 @@ async def run_translation(
                 await translator.send_audio(chunk)
             except SystemAudioCaptureError as exc:
                 logger.error(str(exc))
-                window.set_text(str(exc))
+                window.set_text(f"Audio capture stopped: {exc}")
                 stop_event.set()
                 break
             except asyncio.CancelledError:
@@ -220,7 +219,7 @@ async def run_translation(
                     window.set_text(f"Gemini connection failed: {type(exc).__name__}: {exc}")
                     stop_event.set()
                     break
-                window.set_text(f"Audio/Gemini error: {type(exc).__name__}. Retrying...")
+                recovery_notice.report("Gemini reconnecting: connection interrupted. Retrying...")
                 await asyncio.sleep(reconnect_delay)
 
     last_session_id: int | None = None
@@ -244,12 +243,13 @@ async def run_translation(
             if event.error:
                 log_level = logging.INFO if is_expected_reconnect_message(event.error) else logging.WARNING
                 logger.log(log_level, "Gemini event error: %s", event.error)
-                if event.fatal:
+                if event.fatal or not reconnect:
                     window.set_text(f"Gemini connection failed: {event.error}")
                     stop_event.set()
                     return
-                window.set_text(f"Gemini reconnecting: {event.error or 'connection error'}")
+                recovery_notice.report("Gemini reconnecting: connection interrupted. Retrying...")
                 continue
+            recovery_notice.reset()
             input_text = event.input_text if show_input else None
             output_text = None
             if log_transcriptions and show_input and event.input_text:
@@ -267,10 +267,11 @@ async def run_translation(
                 )
 
     async def connect_until_ready() -> bool:
+        window.set_text("Connecting to Gemini...")
         while not stop_event.is_set():
             try:
-                window.set_text("Connecting to Gemini...")
                 await translator.start()
+                recovery_notice.reset()
                 window.set_text("Connected. Waiting for audio...")
                 return True
             except Exception as exc:
@@ -283,7 +284,7 @@ async def run_translation(
                     window.set_text(f"Gemini connection failed: {type(exc).__name__}: {exc}")
                     stop_event.set()
                     return False
-                window.set_text(f"Gemini connection failed: {type(exc).__name__}. Retrying...")
+                recovery_notice.report("Gemini connection failed: unable to connect. Retrying...")
                 await asyncio.sleep(reconnect_delay)
         return False
 
@@ -322,6 +323,7 @@ async def run_translation(
                 # Cancel both users before closing: a sender awaiting network
                 # backpressure must never hold up an intentional disconnect.
                 await cancel_session_tasks()
+                recovery_notice.reset()
                 # Silence wake preroll is retained. Manually paused packets
                 # carry an older generation and can never be sent on resume.
                 logger.info("Desktop session sleeping | reason=%s", "user_pause" if controls.pause_event.is_set() else "silence")
@@ -363,9 +365,17 @@ async def run_translation(
                 error = task.exception()
                 if error is not None:
                     raise error
+                if stop_event.is_set():
+                    break
                 window.set_text(f"Translator stopped: {task.get_name()} ended unexpectedly.")
                 stop_event.set()
                 break
+            if not stop_event.is_set() and not controls.session_should_sleep():
+                # The sender can reconnect while the receiver is still in its
+                # retry backoff, before a session_started event can be emitted.
+                if translator.is_connected:
+                    recovery_notice.reset()
+                recovery_notice.update()
             await asyncio.sleep(0.05)
     finally:
         stop_event.set()
@@ -374,6 +384,7 @@ async def run_translation(
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+        recovery_notice.reset()
         if capture_thread is not None:
             capture_thread.join(timeout=2)
         try:

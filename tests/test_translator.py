@@ -203,6 +203,8 @@ class TranslatorLifecycleTests(unittest.IsolatedAsyncioTestCase):
         event = await events.__anext__()
         self.assertTrue(event.session_started)
         event = await events.__anext__()
+        self.assertTrue(event.session_started)
+        event = await events.__anext__()
         await events.aclose()
         await translator.close()
 

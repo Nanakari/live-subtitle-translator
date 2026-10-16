@@ -18,6 +18,8 @@ src/live_subtitle_translator/
   silence_detector.py               Local silence sleep/wake decisions
   gemini_live_translate.py           Gemini session, transport and watchdogs
   connection_errors.py              Retry and resumption error classification
+  recovery_notice.py                Delayed notices for continuous outages
+  transport_diagnostics.py          Safe exception chains and rotation classification
   desktop_runtime.py                Settings, controls, hotkey, mutex and tray
   process_control.py                Current desktop identity and stop event
   subtitle_config.py                Typed subtitle settings

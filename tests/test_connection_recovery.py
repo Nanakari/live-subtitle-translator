@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import queue
 import threading
 import unittest
@@ -8,7 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 from google import genai
+from google.genai import live
 from google.genai.errors import ClientError
+from websockets.asyncio.client import connect
+from websockets.asyncio.server import serve
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosedError, InvalidStatus
 from websockets.frames import Close
@@ -19,6 +23,7 @@ from live_subtitle_translator.connection_errors import is_resumption_rejected, i
 from live_subtitle_translator.gemini_live_translate import GeminiLiveTranslator, TranslationEvent
 from tests import test_desktop as desktop
 from tests import test_subtitle_window as subtitles
+from tests.test_network_lifecycle import eventually
 
 
 def http_error(status):
@@ -111,6 +116,68 @@ class RetryPolicyTests(unittest.TestCase):
 
 
 class RecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_empty_close_frame_reconnects_and_receives_new_translation(self):
+        connections = []
+
+        async def server_handler(socket):
+            connections.append(socket)
+            await socket.recv()
+            await socket.send(json.dumps({"setupComplete": {}}))
+            if len(connections) == 1:
+                # Empty Close payloads are legal and are represented as 1005
+                # by websockets; they must not become a cached terminal error.
+                async with socket.send_context():
+                    socket.protocol.send_close()
+            else:
+                await socket.send(json.dumps({"serverContent": {
+                    "outputTranscription": {"text": "recovered translation"},
+                    "turnComplete": True,
+                }}))
+                await socket.wait_closed()
+
+        async with serve(server_handler, "127.0.0.1", 0) as server:
+            port = server.sockets[0].getsockname()[1]
+
+            def local_connect(_uri, **kwargs):
+                kwargs.pop("ssl", None)
+                kwargs["proxy"] = None
+                return connect(f"ws://127.0.0.1:{port}", **kwargs)
+
+            t = translator(reconnect=True)
+            with patch.object(live, "ws_connect", side_effect=local_connect):
+                stream = t.receive_translations()
+                try:
+                    self.assertTrue((await asyncio.wait_for(stream.__anext__(), 2)).session_started)
+                    failure = await asyncio.wait_for(stream.__anext__(), 2)
+                    self.assertIn("1005", failure.error)
+                    self.assertFalse(failure.fatal)
+                    self.assertTrue((await asyncio.wait_for(stream.__anext__(), 2)).session_started)
+                    recovered = await asyncio.wait_for(stream.__anext__(), 2)
+                    self.assertEqual(recovered.output_text, "recovered translation")
+                    self.assertEqual(len(connections), 2)
+                    self.assertIsNone(t._terminal_error)
+                finally:
+                    await stream.aclose()
+                    await t.close()
+
+    async def test_authentication_close_1008_remains_terminal(self):
+        failure = ConnectionClosedError(Close(1008, "invalid authentication credentials"), None)
+        sdk, t = SDK(Session(failure)), translator(reconnect=True)
+        with patch.object(genai, "Client", side_effect=sdk.client):
+            stream = t.receive_translations()
+            try:
+                self.assertTrue((await stream.__anext__()).session_started)
+                event = await stream.__anext__()
+                self.assertTrue(event.fatal)
+                with self.assertRaises(StopAsyncIteration):
+                    await stream.__anext__()
+                with self.assertRaises(ConnectionClosedError):
+                    await t.start()
+                self.assertEqual(len(sdk.clients), 1)
+            finally:
+                await stream.aclose()
+                await t.close()
+
     async def test_initial_permanent_failure_is_cached_across_concurrent_callers(self):
         sdk, t = SDK(http_error(401)), translator()
         with patch.object(genai, "Client", side_effect=sdk.client):
@@ -192,6 +259,146 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sdk.handles, ["valid-handle"])
             self.assertEqual(t._resumption_handle, "valid-handle")
             await t.close()
+
+    async def test_each_receive_turn_on_same_connection_does_not_announce_a_restart(self):
+        class TurnSession(Session):
+            receive_calls = 0
+
+            async def receive(self):
+                self.receive_calls += 1
+                yield message(None, f"turn-{self.receive_calls}")
+
+        session, t = TurnSession(), translator()
+        sdk = SDK(session)
+        with patch.object(genai, "Client", side_effect=sdk.client):
+            stream = t.receive_translations()
+            try:
+                self.assertTrue((await stream.__anext__()).session_started)
+                first = await stream.__anext__()
+                second = await stream.__anext__()
+                self.assertEqual((first.output_text, second.output_text), ("turn-1", "turn-2"))
+                self.assertFalse(first.session_started)
+                self.assertFalse(second.session_started)
+                self.assertEqual(session.receive_calls, 2)
+            finally:
+                await stream.aclose()
+                await t.close()
+
+    async def test_sender_recovery_clears_notices_during_receiver_backoff(self):
+        for display_before_recovery in (False, True):
+            with self.subTest(display_before_recovery=display_before_recovery):
+                sdk = SDK(Session(ConnectionError("offline")), Session())
+                stop = threading.Event()
+                failure_reported = asyncio.Event()
+                events = []
+                instances = []
+
+                class Translator(GeminiLiveTranslator):
+                    def __init__(self, **kwargs):
+                        super().__init__(api_key="test", reconnect_delay_seconds=60,
+                            server_data_timeout_seconds=0, subtitle_data_timeout_seconds=0,
+                            translation_output_timeout_seconds=0)
+                        instances.append(self)
+
+                    async def receive_translations(self):
+                        async for event in super().receive_translations():
+                            events.append(event)
+                            if event.error:
+                                failure_reported.set()
+                            yield event
+
+                class Window(desktop.FakeWindow):
+                    def __init__(self):
+                        super().__init__()
+                        self.status = ""
+                        self.cleared = []
+
+                    def set_text(self, text):
+                        super().set_text(text)
+                        self.status = text
+
+                    def clear_status(self, expected_text):
+                        self.cleared.append(expected_text)
+                        if self.status == expected_text:
+                            self.status = ""
+
+                window = Window()
+                with patch.object(genai, "Client", side_effect=sdk.client), patch.object(app, "GeminiLiveTranslator", Translator), patch.object(app, "SystemAudioCapture", desktop.IdleCapture):
+                    task = asyncio.create_task(app.run_translation(
+                        {"app": {"error_display_delay_seconds": 0 if display_before_recovery else 0.1}},
+                        window, stop))
+                    try:
+                        await asyncio.wait_for(failure_reported.wait(), 1)
+                        t = instances[0]
+                        self.assertFalse(t.is_connected)
+                        if display_before_recovery:
+                            await eventually(lambda: window.status.startswith("Gemini reconnecting:"))
+                        # The actual sender can reconnect even though the receiver
+                        # remains in its 60-second backoff and cannot emit an event.
+                        await t.send_audio(b"\0\0")
+                        self.assertTrue(t.is_connected)
+                        if display_before_recovery:
+                            await eventually(lambda: bool(window.cleared))
+                            self.assertEqual(window.status, "")
+                        else:
+                            await asyncio.sleep(0.2)
+                            self.assertFalse(any(text.startswith("Gemini reconnecting:") for text in window.messages))
+                        self.assertEqual(len([event for event in events if event.session_started]), 1)
+                    finally:
+                        stop.set()
+                        await asyncio.wait_for(task, 1)
+                    self.assertFalse(instances[0].is_connected)
+
+    async def test_desktop_resumption_announces_connection_without_resetting_subtitles(self):
+        resume_update = SimpleNamespace(
+            session_resumption_update=SimpleNamespace(resumable=True, new_handle="valid-handle"),
+            server_content=None,
+        )
+        old = Session(message("source", "FIRST"), resume_update, ConnectionError("offline"))
+        new = Session(message(None, "SECOND"))
+        sdk = SDK(old, new)
+        stop = threading.Event()
+        events = []
+
+        class Translator(GeminiLiveTranslator):
+            def __init__(self, **kwargs):
+                super().__init__(api_key="test", reconnect_delay_seconds=0,
+                    server_data_timeout_seconds=0, subtitle_data_timeout_seconds=0,
+                    translation_output_timeout_seconds=0)
+
+            async def receive_translations(self):
+                async for event in super().receive_translations():
+                    events.append(event)
+                    yield event
+
+        class Window(desktop.FakeWindow):
+            def __init__(self):
+                super().__init__()
+                self.state = subtitles.SubtitleWindowTests().make_window()
+                self.resets = []
+
+            def reset_pairing(self, session_id=None):
+                self.resets.append(session_id)
+                self.state._consume_update("reset_pairing", None, None, session_id=session_id)
+
+            def set_bilingual(self, input_text=None, output_text=None, turn_complete=False, session_id=None):
+                self.state._consume_update("bilingual", input_text, output_text, turn_complete, session_id)
+                if output_text == "SECOND":
+                    stop.set()
+
+        window = Window()
+        with patch.object(genai, "Client", side_effect=sdk.client), patch.object(app, "GeminiLiveTranslator", Translator), patch.object(app, "SystemAudioCapture", desktop.IdleCapture):
+            await asyncio.wait_for(app.run_translation(
+                {"gemini": {"show_input_transcription": True}}, window, stop), 2)
+        self.assertEqual(sdk.handles, [None, "valid-handle"])
+        self.assertEqual(
+            ["started" if event.session_started else "error" if event.error else event.output_text for event in events],
+            ["started", "FIRST", "error", "started", "SECOND"],
+        )
+        self.assertEqual([event.session_id for event in events if event.session_started], [1, 1])
+        self.assertEqual(window.resets, [1])
+        self.assertEqual(window.state._current_zh, "FIRSTSECOND")
+        self.assertEqual([text for _, text in window.state._ja_fragments], ["source"])
 
     async def test_desktop_auto_reconnect_resets_ui_before_first_new_translation(self):
         old = Session(message("old source", "OLD_UNFINISHED"), ConnectionError("offline"))

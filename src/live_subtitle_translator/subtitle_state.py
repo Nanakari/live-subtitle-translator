@@ -9,6 +9,7 @@ from .subtitle_config import SubtitleWindowConfig
 
 HARD_PUNCTUATION = "。！？!?;；"
 SOFT_PUNCTUATION = "，,、"
+SENTENCE_SEPARATOR = "  "
 
 
 class SubtitleState:
@@ -46,9 +47,14 @@ class SubtitleState:
             self._status = self._normalize(zh_text)
             self._log_subtitle("status", status=self._status)
             return True
+        if kind == "clear_status":
+            if self._status and self._status == self._normalize(zh_text):
+                self._status = ""
+                return True
+            return False
 
+        changed = session_changed or bool(self._status)
         self._status = ""
-        changed = session_changed
 
         if ja_text:
             changed = self._add_ja_fragment(ja_text) or changed
@@ -366,7 +372,10 @@ class SubtitleState:
                 # Do not let a rejected short block become carry context for
                 # a later, unrelated source fragment.
                 rendered = self._append_block(display_source, zh_segment, force=True)
-            changed = rendered or changed
+            # Compact streaming displays the queued/carry stages too. Moving
+            # or rejecting a queued segment can change that visible track even
+            # when no history block was committed.
+            changed = rendered or (self._show_pending and self._is_compact_style) or changed
             if not source_confident:
                 self._reset_pairing_state()
             elif self.config.clear_ja_after_pair:
@@ -414,16 +423,20 @@ class SubtitleState:
         The full source context is still used for alignment and consumption,
         but repeating it in every continuation block makes stable bilingual
         subtitles look duplicated. Only the newly arrived suffix is rendered
-        once the previous context is already present in history.
+        once the previous context is already present in history or short carry.
         """
         continuation = getattr(self, "_source_continuation", None)
         if not continuation or not paired_source:
             return paired_source
         _, previous_source = continuation
-        if not previous_source or not self._is_recent_text(previous_source, "ja"):
-            return paired_source
         normalized_source = self._normalize(paired_source)
         normalized_previous = self._normalize(previous_source)
+        previous_is_visible = self._is_recent_text(previous_source, "ja") or (
+            bool(normalized_previous)
+            and self._normalize(self._carry_ja).endswith(normalized_previous)
+        )
+        if not previous_source or not previous_is_visible:
+            return paired_source
         if normalized_source.startswith(normalized_previous):
             return normalized_source[len(normalized_previous) :].strip()
         return paired_source
@@ -503,14 +516,37 @@ class SubtitleState:
             if self._show_translation_text and block.get("zh"):
                 translation_parts.append(block["zh"])
         if self._show_pending:
-            pending_ja = self._pending_ja_text()
+            if self._show_source_text and self._carry_ja:
+                source_parts.append(self._carry_ja)
+            if self._show_translation_text and self._carry_zh:
+                translation_parts.append(self._carry_zh)
+            if self._pending_zh_segments:
+                # Select the outstanding source range once. Pairing each
+                # queued translation independently can repeat the same source
+                # packet in the compact track.
+                now = time.monotonic()
+                starts = [
+                    self._pending_zh_values(item)[1]
+                    for item in self._pending_zh_segments
+                ]
+                if self._current_zh_started_at is not None:
+                    starts.append(self._current_zh_started_at)
+                pending_ja = self._ja_text_for_range(min(starts), now, now)
+            else:
+                pending_ja = self._pending_ja_text()
+            pending_ja = self._source_text_for_display(pending_ja)
             if self._show_source_text and pending_ja:
                 source_parts.append(pending_ja)
+            if self._show_translation_text:
+                translation_parts.extend(
+                    self._pending_zh_values(item)[3]
+                    for item in self._pending_zh_segments
+                )
             if self._show_translation_text and self._current_zh:
                 translation_parts.append(self._current_zh)
         return (
-            self._display_text(" ".join(source_parts)),
-            self._display_text(" ".join(translation_parts)),
+            SENTENCE_SEPARATOR.join(filter(None, map(self._display_text, source_parts))),
+            SENTENCE_SEPARATOR.join(filter(None, map(self._display_text, translation_parts))),
         )
 
     def _build_render_items(self) -> list[tuple[str, str]]:
@@ -561,10 +597,14 @@ class SubtitleState:
         if not normalized:
             return ""
         # Keep decimal points such as 3.14 intact, while replacing ordinary
-        # ASCII sentence periods and CJK full stops with visual spaces.
-        normalized = re.sub(r"(?<!\d)\.(?!\d)", " ", normalized)
-        normalized = normalized.translate(str.maketrans({"。": " ", "｡": " ", "．": " "}))
-        return SubtitleState._normalize(normalized)
+        # ASCII sentence periods and CJK full stops with a wider visual gap.
+        # Apply the gap after normalization so word spaces stay single and
+        # sentence spaces aren't collapsed again.
+        return re.sub(
+            r"(?:\s*(?:(?<!\d)\.(?!\d)|[。｡．])\s*)+",
+            SENTENCE_SEPARATOR,
+            normalized,
+        ).strip()
 
     @property
     def _show_pending(self) -> bool:
@@ -958,8 +998,18 @@ class SubtitleState:
             fragment = SubtitleState._normalize(fragment)
             if not fragment:
                 continue
-            # Latin words need separation; CJK fragments usually do not.
-            if result and re.search(r"[A-Za-z0-9.,;:!?]$", result) and re.match(r"[A-Za-z]", fragment):
+            # These are already segmented blocks, not raw transcription
+            # deltas. Preserve a sentence boundary before a number so short
+            # carries like "Count 1." + "2." cannot become "Count 1.2.".
+            # Decimal deltas still join directly in _consume_stream.
+            latin_word_boundary = (
+                re.search(r"[A-Za-z0-9.,;:!?]$", result)
+                and re.match(r"[A-Za-z]", fragment)
+            )
+            numeric_sentence_boundary = (
+                SubtitleState._ends_sentence(result) and fragment[0].isdigit()
+            )
+            if result and (latin_word_boundary or numeric_sentence_boundary):
                 result += " "
             result += fragment
         return result

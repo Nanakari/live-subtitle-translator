@@ -22,9 +22,13 @@ class FakeWindow:
     def set_bilingual(self, **_kwargs) -> None:
         return None
 
+    def clear_status(self, expected_text: str) -> None:
+        return None
+
 
 class WaitingTranslator:
     instances: list["WaitingTranslator"] = []
+    is_connected = False
 
     def __init__(self, **_kwargs) -> None:
         self.closed = False
@@ -212,7 +216,7 @@ class DesktopLifecycleTests(unittest.IsolatedAsyncioTestCase):
                 timeout=1,
             )
 
-        self.assertIn("No usable loopback device was found", window.messages)
+        self.assertIn("Audio capture stopped: No usable loopback device was found", window.messages)
 
     async def test_finished_receive_task_stops_fake_running_desktop(self) -> None:
         window = FakeWindow()
